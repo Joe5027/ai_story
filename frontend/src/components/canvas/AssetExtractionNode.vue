@@ -30,6 +30,10 @@
           v-if="selectedItem"
           class="meta-chip accent"
         >当前查看 {{ selectedItem.label || selectedItem.key }}</span>
+        <span
+          v-if="isPaidImageProvider"
+          class="meta-chip paid"
+        >API 生图需逐次确认费用</span>
       </div>
     </div>
 
@@ -416,6 +420,11 @@
 
 <script>
 import projectsAPI from '@/api/projects';
+import {
+  confirmPaidGeneration,
+  getPaidConfirmationDemand,
+  isPaidConfirmationRequired,
+} from '@/services/paidGenerationGuard';
 
 export default {
   name: 'AssetExtractionNode',
@@ -439,6 +448,10 @@ export default {
     availableAssets: {
       type: Array,
       default: () => []
+    },
+    imageProvider: {
+      type: Object,
+      default: null
     }
   },
   data() {
@@ -487,6 +500,9 @@ export default {
     },
     previewImageUrl() {
       return (this.selectedItem && this.selectedItem.generated_image_preview && this.selectedItem.generated_image_preview.url) || '';
+    },
+    isPaidImageProvider() {
+      return this.imageProvider?.deployment_mode === 'api';
     },
     filteredAssetOptions() {
       const item = this.selectedItem;
@@ -723,10 +739,52 @@ export default {
       }
       this.isGeneratingImage = true;
       try {
-        const response = await projectsAPI.generateAssetExtractionImage(this.projectId, {
+        const requestPayload = {
           temp_id: this.selectedItem.temp_id,
           prompt,
-        });
+        };
+        let response;
+        try {
+          response = await projectsAPI.generateAssetExtractionImage(
+            this.projectId,
+            requestPayload,
+            { suppressGlobalError: true }
+          );
+        } catch (error) {
+          if (!isPaidConfirmationRequired(error)) {
+            throw error;
+          }
+          const paidDemand = getPaidConfirmationDemand(error);
+          const paidConfirmation = await confirmPaidGeneration({
+            projectId: this.projectId,
+            capability: paidDemand.capability || 'text2image',
+            stageType: paidDemand.stage_type || 'asset_extraction_preview',
+            taskCount: 1,
+            usagePerItem: {
+              request_count: 1,
+              image_count: 1,
+              width: 1024,
+              height: 1024,
+              ...(paidDemand.usage_per_item || {}),
+            },
+            providerId: paidDemand.provider_id || this.imageProvider?.id || null,
+            operationLabel: `为“${this.selectedItem.label || this.selectedItem.key}”使用 API 生成预览图`,
+            confirm: this.$confirm,
+            alert: this.$alert,
+          });
+          if (!paidConfirmation) {
+            this.$message?.info('已取消，本次图片预览未发送到外部 Provider');
+            return;
+          }
+          response = await projectsAPI.generateAssetExtractionImage(
+            this.projectId,
+            {
+              ...requestPayload,
+              confirm_paid: true,
+              confirmed_max_cost_cny: paidConfirmation.maxCostCny,
+            }
+          );
+        }
         this.applyStagePayload(response.stage);
         this.$message?.success('图片预览已生成');
       } catch (error) {
@@ -990,6 +1048,16 @@ export default {
 .type-pill {
   background: rgba(34, 211, 238, 0.14);
   color: #0891b2;
+}
+
+.meta-chip.paid {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+
+.layout-shell.theme-dark .meta-chip.paid {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
 }
 
 .card-body {

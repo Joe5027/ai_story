@@ -792,7 +792,7 @@ export default {
   },
   created() {
   },
-  beforeDestroy() {
+  beforeUnmount() {
     this.disconnectSSE();
   },
   methods: {
@@ -906,7 +906,7 @@ export default {
       // 清除该场景的编辑状态
       Object.keys(this.editingFields).forEach(key => {
         if (key.startsWith(`${sceneNumber}_`)) {
-          this.$delete(this.editingFields, key);
+          delete this.editingFields[key];
         }
       });
 
@@ -938,7 +938,7 @@ export default {
         this.saveEdit(sceneNumber, field);
       } else {
         // 进入编辑模式
-        this.$set(this.editingFields, key, true);
+        this.editingFields[key] = true;
       }
     },
 
@@ -951,7 +951,7 @@ export default {
     // 保存编辑
     saveEdit(sceneNumber, field) {
       const key = `${sceneNumber}_${field}`;
-      this.$set(this.editingFields, key, false);
+      this.editingFields[key] = false;
 
       // 确保本地数据已初始化
       if (this.localScenes.length === 0 && this.scenes.length > 0) {
@@ -990,7 +990,7 @@ export default {
 
     // 选择指定索引的图片
     selectImage(sceneNumber, imageIndex) {
-      this.$set(this.selectedImages, sceneNumber, imageIndex);
+      this.selectedImages[sceneNumber] = imageIndex;
     },
 
     // 获取当前场景选中的视频索引(默认第一个)
@@ -1013,7 +1013,7 @@ export default {
 
     // 选择指定索引的视频
     selectVideo(sceneNumber, videoIndex) {
-      this.$set(this.selectedVideos, sceneNumber, videoIndex);
+      this.selectedVideos[sceneNumber] = videoIndex;
     },
 
     // 打开图片查看模态框(可选功能,暂时只是占位)
@@ -1082,7 +1082,7 @@ export default {
       }
 
       // 设置加载状态
-      this.$set(this.executingScenes, sceneNumber, true);
+      this.executingScenes[sceneNumber] = true;
 
       try {
         // 准备输入数据 - 单个场景的分镜数据
@@ -1110,7 +1110,7 @@ export default {
         const errorMsg = error.response?.data?.error || error.message || '生成失败';
         this.$message?.error(`场景 ${sceneNumber} 生成失败: ${errorMsg}`);
         // 清除加载状态
-        this.$set(this.executingScenes, sceneNumber, false);
+        this.executingScenes[sceneNumber] = false;
       }
     },
 

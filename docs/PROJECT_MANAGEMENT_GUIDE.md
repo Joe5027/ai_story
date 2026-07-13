@@ -115,7 +115,7 @@
 | `frontend/src/api/projects.js` | API客户端封装 | 170 |
 | `frontend/src/store/modules/projects.js` | Vuex状态管理 | 333 |
 | `frontend/src/views/projects/ProjectCreate.vue` | 项目创建页面（daisyUI） | 302 |
-| `frontend/src/views/projects/ProjectDetailNew.vue` | 项目详情页面（daisyUI） | 470 |
+| `frontend/src/views/projects/ProjectDetail.vue` | 项目详情页面 | - |
 | `frontend/src/views/projects/ProjectList.vue` | 项目列表页面（已存在） | - |
 
 ---

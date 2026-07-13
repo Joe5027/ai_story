@@ -250,6 +250,9 @@ export default {
   created() {
     this.fetchData();
   },
+  beforeUnmount() {
+    this.clearCurrentScreenplay();
+  },
   methods: {
     ...mapActions('screenplays', [
       'fetchScreenplayDetail',
@@ -320,9 +323,6 @@ export default {
         sort_order: 0,
       };
     },
-  },
-  beforeDestroy() {
-    this.clearCurrentScreenplay();
   },
 };
 </script>

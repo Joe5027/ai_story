@@ -7,7 +7,7 @@
  * - 所有阶段: GET /api/v1/projects/sse/projects/{project_id}/
  */
 
-const API_BASE_URL = process.env.VUE_APP_API_BASE_URL || 'http://localhost:8010';
+const API_BASE_URL = (process.env.VUE_APP_API_BASE_URL || '/api/v1').replace(/\/$/, '');
 
 let sseClientInstanceId = 0;
 
@@ -224,7 +224,7 @@ export class SSEClient {
  */
 export function createProjectStageSSE(projectId, stageName, options = {}) {
   const client = new SSEClient();
-  const url = `${API_BASE_URL}/api/v1/projects/sse/projects/${projectId}/stages/${stageName}/`;
+  const url = `${API_BASE_URL}/projects/sse/projects/${projectId}/stages/${stageName}/`;
   client.connect(url, options);
   return client;
 }
@@ -238,7 +238,7 @@ export function createProjectStageSSE(projectId, stageName, options = {}) {
  */
 export function createProjectAllStagesSSE(projectId, options = {}) {
   const client = new SSEClient();
-  const url = `${API_BASE_URL}/api/v1/projects/sse/projects/${projectId}/`;
+  const url = `${API_BASE_URL}/projects/sse/projects/${projectId}/`;
   // 全阶段订阅模式：只有 pipeline_done/pipeline_error 才关闭连接
   client.connect(url, { ...options, allStagesMode: true });
   return client;
@@ -362,7 +362,7 @@ export const sseClientMixin = {
       this.sseMessages = [];
     },
   },
-  beforeDestroy() {
+  beforeUnmount() {
     // 组件销毁时自动断开连接
     this.disconnectSSE();
   },

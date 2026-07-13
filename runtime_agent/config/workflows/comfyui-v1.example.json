@@ -1,0 +1,75 @@
+{
+  "manifest_version": 1,
+  "workflow_version": "comfyui-example-v1",
+  "model_ids": [
+    "comfyui/example-model"
+  ],
+  "model_version": "replace-with-fixed-model-sha256",
+  "workflow": {
+    "1": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": ""
+      }
+    },
+    "2": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": ""
+      }
+    },
+    "3": {
+      "class_type": "EmptyLatentImage",
+      "inputs": {
+        "width": 1024,
+        "height": 1024
+      }
+    },
+    "4": {
+      "class_type": "KSampler",
+      "inputs": {
+        "seed": 0
+      }
+    },
+    "5": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      }
+    }
+  },
+  "bindings": {
+    "prompt": {
+      "node_id": "1",
+      "input_name": "text"
+    },
+    "negative_prompt": {
+      "node_id": "2",
+      "input_name": "text"
+    },
+    "width": {
+      "node_id": "3",
+      "input_name": "width"
+    },
+    "height": {
+      "node_id": "3",
+      "input_name": "height"
+    },
+    "seed": {
+      "node_id": "4",
+      "input_name": "seed"
+    },
+    "input_artifacts": [
+      {
+        "node_id": "5",
+        "input_name": "image"
+      }
+    ]
+  },
+  "outputs": [
+    {
+      "node_id": "9",
+      "collection": "images"
+    }
+  ]
+}

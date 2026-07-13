@@ -72,7 +72,10 @@
                   @click="handleSelectModel(item.id)"
                 >
                   <span class="model-menu-title">{{ item.name }} / {{ item.model_name }}</span>
-                  <small v-if="getModelStatusLabel(item)" class="model-menu-status">{{ getModelStatusLabel(item) }}</small>
+                  <small
+                    v-if="getModelStatusLabel(item)"
+                    class="model-menu-status"
+                  >{{ getModelStatusLabel(item) }}</small>
                 </button>
               </div>
             </div>

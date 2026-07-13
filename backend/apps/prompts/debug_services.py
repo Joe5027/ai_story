@@ -111,6 +111,21 @@ class PromptDebugService:
             provider = cls.get_default_provider(session.stage_type)
         return provider
 
+    @staticmethod
+    def require_safe_debug_provider(provider: ModelProvider) -> None:
+        """Prompt Debug 缺少项目上下文时禁止付费生成。
+
+        Prompt Debug 当前是模板级工具，运行请求没有 project_id，也没有“本次
+        付费”确认字段，因此无法满足项目云授权、有效价目表和预算三重门。这里
+        在创建客户端前明确 fail closed；本地和 Mock 调试继续沿用原接口。
+        """
+
+        if getattr(provider, 'deployment_mode', 'api') == 'api':
+            raise ValueError(
+                'PAID_PROJECT_CONTEXT_REQUIRED: Prompt Debug 的付费 API 调用需要项目上下文、'
+                '云端出站授权和本次费用确认；当前调试接口未提供这些字段，已在外呼前阻断。'
+            )
+
     @classmethod
     def build_template_context(
         cls,
@@ -667,6 +682,8 @@ class PromptDebugService:
         expected_provider_type = cls.STAGE_PROVIDER_TYPE_MAP.get(session.stage_type)
         if expected_provider_type and provider.provider_type != expected_provider_type:
             raise ValueError('选择的模型类型与当前阶段不匹配')
+
+        cls.require_safe_debug_provider(provider)
 
         context = cls.build_template_context(
             user=user,

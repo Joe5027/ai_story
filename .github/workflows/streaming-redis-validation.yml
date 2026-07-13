@@ -1,0 +1,73 @@
+name: Streaming Redis Validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'backend/apps/projects/asgi_sse.py'
+      - 'backend/apps/projects/sse_views.py'
+      - 'backend/apps/projects/tests/test_asgi_sse.py'
+      - 'backend/apps/projects/tests/test_redis_pubsub.py'
+      - 'backend/apps/projects/tests/test_sse_views.py'
+      - 'backend/config/asgi.py'
+      - 'backend/core/redis/**'
+      - 'frontend/scripts/streaming-authenticated-smoke.cjs'
+      - 'frontend/src/services/sseService.js'
+      - 'scripts/validate-streaming-local.cjs'
+      - '.github/workflows/streaming-redis-validation.yml'
+
+concurrency:
+  group: streaming-redis-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  streaming-redis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Streaming contracts, Redis, ASGI, and browser smoke
+        env:
+          REQUIRE_REDIS: '1'
+          REDIS_HOST: localhost
+          REDIS_PORT: '6379'
+        run: node scripts/validate-streaming-local.cjs --require-redis

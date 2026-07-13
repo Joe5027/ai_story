@@ -88,7 +88,9 @@
                   v-model="form.group"
                   class="field-input"
                 >
-                  <option value="">无分组</option>
+                  <option value="">
+                    无分组
+                  </option>
                   <option
                     v-for="group in groups"
                     :key="group"

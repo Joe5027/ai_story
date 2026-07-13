@@ -23,6 +23,8 @@ const createStatusMessage = (content) => createMessage('system', content, {
 
 const createFreshMessages = (context) => (context ? [createInitialAssistantMessage(context)] : []);
 
+const isOptionalAgentUnavailable = (error) => error?.response?.status === 404;
+
 const pickDefaultModelId = (models) => {
   const readyModel = models.find((item) => item.runtime_available);
   return readyModel?.id || '';
@@ -50,6 +52,7 @@ const state = {
   messages: [],
   availableModels: [],
   selectedModelProviderId: '',
+  backendAvailable: true,
   sessions: {},
   initializedScopes: {},
   requestController: null,
@@ -124,6 +127,9 @@ const mutations = {
   SET_SELECTED_MODEL_PROVIDER_ID(state, providerId) {
     state.selectedModelProviderId = providerId || '';
   },
+  SET_BACKEND_AVAILABLE(state, value) {
+    state.backendAvailable = Boolean(value);
+  },
   CLEAR_SESSION(state, scopeKey) {
     if (!scopeKey) {
       state.messages = createFreshMessages(state.currentContext);
@@ -194,7 +200,7 @@ const actions = {
       commit('SET_CONTEXT', context);
     }
 
-    if (context?.scopeKey && !state.initializedScopes[context.scopeKey]) {
+    if (state.backendAvailable && context?.scopeKey && !state.initializedScopes[context.scopeKey]) {
       try {
         await agentService.initSession({
           scope_key: context.scopeKey,
@@ -205,7 +211,11 @@ const actions = {
         });
         commit('SET_SCOPE_INITIALIZED', context.scopeKey);
       } catch (error) {
-        console.error('Failed to init agent session:', error);
+        if (isOptionalAgentUnavailable(error)) {
+          commit('SET_BACKEND_AVAILABLE', false);
+        } else {
+          console.error('Failed to init agent session:', error);
+        }
       }
     }
   },
@@ -223,53 +233,68 @@ const actions = {
     commit('ADD_MESSAGE', pendingMessage);
 
     try {
-      const response = await agentService.sendMessage(state.currentContext.scopeKey, {
-        text: content,
-        route_name: state.currentContext?.meta?.routeName || '',
-        route_params: buildRouteParams(state.currentContext),
-        ui_context: buildUiContext(state.currentContext),
-        selected_model_provider_id: state.selectedModelProviderId,
-      });
+      if (state.backendAvailable) {
+        const response = await agentService.sendMessage(state.currentContext.scopeKey, {
+          text: content,
+          route_name: state.currentContext?.meta?.routeName || '',
+          route_params: buildRouteParams(state.currentContext),
+          ui_context: buildUiContext(state.currentContext),
+          selected_model_provider_id: state.selectedModelProviderId,
+        });
 
-      const controller = new AbortController();
-      commit('SET_REQUEST_CONTROLLER', controller);
-      let assembledText = '';
-      const suggestions = [];
+        const controller = new AbortController();
+        commit('SET_REQUEST_CONTROLLER', controller);
+        let assembledText = '';
+        const suggestions = [];
 
-      await agentService.consumeStream({
-        scopeKey: state.currentContext.scopeKey,
-        streamToken: response.stream_token,
-        accessToken: rootGetters['auth/accessToken'],
-        signal: controller.signal,
-        onEvent: (event) => {
-          if (event.type === 'token') {
-            assembledText += event.content || '';
-            commit('REPLACE_LAST_MESSAGE', createMessage('assistant', assembledText || '正在生成中...', {
-              pending: true,
-              suggestions: [...suggestions],
-            }));
-          } else if (event.type === 'message') {
-            assembledText = event.content || assembledText;
-            commit('REPLACE_LAST_MESSAGE', createMessage('assistant', assembledText, {
-              suggestions: [...suggestions],
-            }));
-          } else if (event.type === 'status') {
-            if (!assembledText) {
-              commit('REPLACE_LAST_MESSAGE', createStatusMessage(event.status || '正在处理中...'));
+        await agentService.consumeStream({
+          scopeKey: state.currentContext.scopeKey,
+          streamToken: response.stream_token,
+          accessToken: rootGetters['auth/accessToken'],
+          signal: controller.signal,
+          onEvent: (event) => {
+            if (event.type === 'token') {
+              assembledText += event.content || '';
+              commit('REPLACE_LAST_MESSAGE', createMessage('assistant', assembledText || '正在生成中...', {
+                pending: true,
+                suggestions: [...suggestions],
+              }));
+            } else if (event.type === 'message') {
+              assembledText = event.content || assembledText;
+              commit('REPLACE_LAST_MESSAGE', createMessage('assistant', assembledText, {
+                suggestions: [...suggestions],
+              }));
+            } else if (event.type === 'status') {
+              if (!assembledText) {
+                commit('REPLACE_LAST_MESSAGE', createStatusMessage(event.status || '正在处理中...'));
+              }
+            } else if (event.type === 'ui_intent') {
+              suggestions.push(createSuggestionFromIntent(event));
+              commit('REPLACE_LAST_MESSAGE', createMessage('assistant', assembledText || '我已整理出可执行动作。', {
+                pending: !assembledText,
+                suggestions: [...suggestions],
+              }));
+            } else if (event.type === 'error') {
+              throw new Error(event.message || '页面助手处理失败');
             }
-          } else if (event.type === 'ui_intent') {
-            suggestions.push(createSuggestionFromIntent(event));
-            commit('REPLACE_LAST_MESSAGE', createMessage('assistant', assembledText || '我已整理出可执行动作。', {
-              pending: !assembledText,
-              suggestions: [...suggestions],
-            }));
-          } else if (event.type === 'error') {
-            throw new Error(event.message || '页面助手处理失败');
-          }
-        },
-      });
+          },
+        });
+      } else {
+        const response = await generateLocalAssistantResponse({
+          context: state.currentContext,
+          prompt: content,
+        });
+
+        commit('REPLACE_LAST_MESSAGE', createMessage('assistant', response.content, {
+          suggestions: response.suggestions || [],
+        }));
+      }
     } catch (error) {
-      console.error('Agent request failed, fallback to local responder:', error);
+      if (isOptionalAgentUnavailable(error)) {
+        commit('SET_BACKEND_AVAILABLE', false);
+      } else {
+        console.error('Agent request failed, fallback to local responder:', error);
+      }
       try {
         const response = await generateLocalAssistantResponse({
           context: state.currentContext,
@@ -307,7 +332,11 @@ const actions = {
           result: result || `已执行「${suggestion.label || suggestion.action}」。`,
         });
       } catch (error) {
-        console.error('Failed to send ui result:', error);
+        if (isOptionalAgentUnavailable(error)) {
+          commit('SET_BACKEND_AVAILABLE', false);
+        } else {
+          console.error('Failed to send ui result:', error);
+        }
       }
 
       commit('ADD_MESSAGE', createMessage('assistant', result || `已执行「${suggestion.label || suggestion.action}」。`));
@@ -318,11 +347,15 @@ const actions = {
   async abort({ commit, state }) {
     try {
       state.requestController?.abort();
-      if (state.activeScopeKey) {
+      if (state.backendAvailable && state.activeScopeKey) {
         await agentService.abort(state.activeScopeKey);
       }
     } catch (error) {
-      console.error('Failed to abort agent request:', error);
+      if (isOptionalAgentUnavailable(error)) {
+        commit('SET_BACKEND_AVAILABLE', false);
+      } else {
+        console.error('Failed to abort agent request:', error);
+      }
     } finally {
       commit('SET_STREAMING', false);
       commit('SET_REQUEST_CONTROLLER', null);
@@ -339,12 +372,19 @@ const actions = {
     }
 
     try {
+      if (!state.backendAvailable) {
+        return;
+      }
       await agentService.clear(state.activeScopeKey);
     } catch (error) {
-      console.error('Failed to clear agent session:', error);
+      if (isOptionalAgentUnavailable(error)) {
+        commit('SET_BACKEND_AVAILABLE', false);
+      } else {
+        console.error('Failed to clear agent session:', error);
+      }
     } finally {
       commit('CLEAR_SESSION', state.activeScopeKey);
-      if (state.currentContext) {
+      if (state.backendAvailable && state.currentContext) {
         try {
           await agentService.initSession({
             scope_key: state.activeScopeKey,
@@ -355,13 +395,22 @@ const actions = {
           });
           commit('SET_SCOPE_INITIALIZED', state.activeScopeKey);
         } catch (error) {
-          console.error('Failed to re-init agent session after clear:', error);
+          if (isOptionalAgentUnavailable(error)) {
+            commit('SET_BACKEND_AVAILABLE', false);
+          } else {
+            console.error('Failed to re-init agent session after clear:', error);
+          }
         }
       }
     }
   },
   async fetchModels({ commit, state }) {
     try {
+      if (!state.backendAvailable) {
+        commit('SET_AVAILABLE_MODELS', []);
+        return [];
+      }
+
       const response = await agentService.getModels();
       const models = response.results || [];
       commit('SET_AVAILABLE_MODELS', models);
@@ -376,11 +425,15 @@ const actions = {
 
       return models;
     } catch (error) {
-      console.error('Failed to fetch assistant models:', error);
+      if (isOptionalAgentUnavailable(error)) {
+        commit('SET_BACKEND_AVAILABLE', false);
+      } else {
+        console.error('Failed to fetch assistant models:', error);
+      }
       if (!state.availableModels.length) {
         commit('SET_AVAILABLE_MODELS', []);
       }
-      throw error;
+      return [];
     }
   },
   async selectModel({ commit, state, dispatch }, providerId) {
@@ -392,14 +445,24 @@ const actions = {
     commit('SET_SELECTED_MODEL_PROVIDER_ID', providerId);
 
     try {
+      if (!state.backendAvailable) {
+        return;
+      }
       await agentService.updateSelectedModel({
         selected_model_provider_id: providerId,
       });
     } catch (error) {
-      console.error('Failed to persist selected assistant model:', error);
+      if (isOptionalAgentUnavailable(error)) {
+        commit('SET_BACKEND_AVAILABLE', false);
+      } else {
+        console.error('Failed to persist selected assistant model:', error);
+      }
     }
 
     try {
+      if (!state.backendAvailable) {
+        return;
+      }
       await agentService.initSession({
         scope_key: state.currentContext?.scopeKey || state.activeScopeKey || 'page-agent',
         route_name: state.currentContext?.meta?.routeName || '',
@@ -408,14 +471,18 @@ const actions = {
         selected_model_provider_id: providerId,
       });
     } catch (error) {
-      console.error('Failed to persist selected assistant model:', error);
+      if (isOptionalAgentUnavailable(error)) {
+        commit('SET_BACKEND_AVAILABLE', false);
+      } else {
+        console.error('Failed to persist selected assistant model:', error);
+      }
     }
 
     if (state.activeScopeKey) {
       await dispatch('clearSession');
     }
 
-    if (state.currentContext?.scopeKey) {
+    if (state.backendAvailable && state.currentContext?.scopeKey) {
       try {
         await agentService.initSession({
           scope_key: state.currentContext.scopeKey,
@@ -426,7 +493,11 @@ const actions = {
         });
         commit('SET_SCOPE_INITIALIZED', state.currentContext.scopeKey);
       } catch (error) {
-        console.error('Failed to init agent session after model change:', error);
+        if (isOptionalAgentUnavailable(error)) {
+          commit('SET_BACKEND_AVAILABLE', false);
+        } else {
+          console.error('Failed to init agent session after model change:', error);
+        }
       }
     }
   },

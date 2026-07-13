@@ -249,7 +249,7 @@ docker-compose up -d
 - [core/ai_client/openai_client.py](backend/core/ai_client/openai_client.py) - OpenAI客户端实现
 - [core/redis/publisher.py](backend/core/redis/publisher.py) - Redis Pub/Sub发布器
 - [config/settings/base.py](backend/config/settings/base.py) - 基础配置
-- [config/celery.py](backend/config/celery.py) - Celery配置
+- [config/celery_app.py](backend/config/celery_app.py) - Celery配置
 
 **前端核心文件**:
 - [frontend/src/views/projects/ProjectList.vue](frontend/src/views/projects/ProjectList.vue) - 项目列表页

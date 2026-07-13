@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "case_set_id": "camera-motion-720p-v1",
+  "category": "video_motion",
+  "status": "not_run",
+  "contains_secrets": false,
+  "input_artifact": "benchmarks/local-ai/image-edit/character-consistency.json#reference_generation.output",
+  "profiles": [
+    "draft",
+    "balanced"
+  ],
+  "candidate_runtimes": [
+    "pinned-ffmpeg-motion-renderer",
+    "pinned-lightx2v-wan-workflow",
+    "configured-api-baseline"
+  ],
+  "common_output_spec": {
+    "width": 1280,
+    "height": 720,
+    "fps": 24,
+    "format": "mp4",
+    "video_codec": "h264",
+    "sample_count": 1
+  },
+  "cases": [
+    {
+      "case_id": "motion-slow-push-in-001",
+      "stage_type": "camera_movement",
+      "seed": 24071321,
+      "duration_seconds": 8,
+      "motion_plan": {
+        "type": "zoom_in",
+        "start_scale": 1.0,
+        "end_scale": 1.12,
+        "focus": "character_face",
+        "easing": "ease_in_out"
+      },
+      "prompt": "镜头从灯塔入口中景缓慢推进到林溪面部，雨丝与海雾轻微移动，角色身份和服装保持稳定，不新增动作或人物。",
+      "expected_contract": {
+        "exact_duration_seconds": 8,
+        "frame_count": 192,
+        "audio_required": false,
+        "must_be_decodable": true
+      }
+    },
+    {
+      "case_id": "motion-horizontal-pan-001",
+      "stage_type": "camera_movement",
+      "seed": 24071322,
+      "duration_seconds": 9,
+      "motion_plan": {
+        "type": "pan_left_to_right",
+        "start_x_ratio": 0.0,
+        "end_x_ratio": 1.0,
+        "overscan_ratio": 0.12,
+        "easing": "linear"
+      },
+      "prompt": "镜头从左侧黄铜机械零件平稳横移到右侧正在修表的林溪，运动速度均匀，面部和工具包保持稳定。",
+      "expected_contract": {
+        "exact_duration_seconds": 9,
+        "frame_count": 216,
+        "audio_required": false,
+        "must_be_decodable": true
+      }
+    },
+    {
+      "case_id": "motion-segment-continuity-001",
+      "stage_type": "video_generation",
+      "seed": 24071323,
+      "duration_seconds": 10,
+      "motion_plan": {
+        "type": "segmented_i2v_crossfade",
+        "max_segment_seconds": 5,
+        "segment_count": 2,
+        "overlap_frames": 8,
+        "next_segment_input": "previous_segment_last_frame",
+        "crossfade": true,
+        "rife_optional": true,
+        "final_trim_seconds": 10
+      },
+      "prompt": "林溪抬头看向重新亮起的灯塔光束，镜头轻微环绕并跟随视线转向海面；两段之间角色脸型、发夹、工具包、光线方向和雨势连续。",
+      "expected_contract": {
+        "exact_duration_seconds": 10,
+        "frame_count": 240,
+        "segment_records_required": 2,
+        "overlap_frames": 8,
+        "final_artifact_lifecycle": "final",
+        "segment_artifact_lifecycle": "intermediate",
+        "audio_required": false,
+        "must_be_decodable": true
+      }
+    }
+  ],
+  "machine_checks": [
+    "ffprobe 报告 1280x720、24fps 和目标时长",
+    "所有 segment 与 final 产物保存 SHA-256、文件大小和编码信息",
+    "峰值 VRAM/RAM 与各阶段耗时来自实际采样",
+    "取消或重启后没有重复 segment、重复 final 或重复账本记录"
+  ],
+  "review_rubric": {
+    "blind_review": true,
+    "dimensions": [
+      "镜头运动平滑度",
+      "角色身份与道具稳定性",
+      "分段边界连续性",
+      "闪烁、形变和重复帧",
+      "构图与运动意图一致性"
+    ],
+    "acceptance_decision": "由用户对本地与既有 API 结果盲审后填写"
+  },
+  "result": {
+    "status": "not_run",
+    "measurement_path": null
+  }
+}

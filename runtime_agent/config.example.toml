@@ -1,0 +1,74 @@
+# AI Story Runtime Agent 固定配置示例。
+# 推荐复制到 E:\AI\ai-story-runtime\config\runtime-agent.toml，
+# 并通过 RUNTIME_AGENT_CONFIG_PATH 指向副本。默认 mode="mock"，不会连接、下载或升级任何模型。
+schema_version = 1
+
+[registry]
+mode = "mock" # 完成安装、清单校验和硬件基准后，人工改为 "configured"
+
+[agent]
+# 相对路径按本 TOML 所在目录解析。Bearer token 只通过受保护的环境文件注入。
+db_path = "../data/runtime-agent.sqlite3"
+artifacts_dir = "../artifacts"
+allow_unauthenticated_loopback = true
+require_auth_non_loopback = true
+gpu_capacity = 1
+cpu_motion_capacity = 2
+poll_interval_ms = 20
+
+[adapters.ollama]
+enabled = false
+base_url = "http://127.0.0.1:11434"
+model_ids = ["ollama/qwen3.5-9b-q4-fixed"]
+model_version = "replace-with-fixed-ollama-digest"
+workflow_version = "ollama-chat-v1"
+timeout_seconds = 120
+
+[adapters.comfyui_text2image]
+enabled = false
+base_url = "http://127.0.0.1:8188"
+manifest_path = "../workflows/flux2-klein-text2image-v1.json"
+model_ids = ["comfyui/flux2-klein-4b"]
+model_version = "replace-with-fixed-model-sha256"
+workflow_version = "flux2-klein-text2image-v1"
+timeout_seconds = 180
+poll_interval_seconds = 0.25
+
+[adapters.comfyui_image_edit]
+enabled = false
+base_url = "http://127.0.0.1:8188"
+manifest_path = "../workflows/flux2-klein-image-edit-v1.json"
+model_ids = ["comfyui/flux2-klein-4b-edit"]
+model_version = "replace-with-fixed-model-sha256"
+workflow_version = "flux2-klein-image-edit-v1"
+timeout_seconds = 180
+poll_interval_seconds = 0.25
+
+[adapters.lightx2v]
+enabled = false
+model_path = "../models/lightx2v-wan2.2-i2v-a14b-4step"
+model_ids = ["lightx2v/wan2.2-i2v-a14b-4step"]
+model_version = "replace-with-fixed-model-sha256"
+workflow_version = "lightx2v-wan22-i2v-v1"
+command_template = [
+  "python",
+  "-m",
+  "lightx2v.infer",
+  "--model", "{model_path}",
+  "--input", "{input_path}",
+  "--prompt", "{prompt}",
+  "--negative-prompt", "{negative_prompt}",
+  "--seed", "{seed}",
+  "--output", "{output_path}",
+]
+timeout_seconds = 900
+
+[adapters.ffmpeg_motion]
+enabled = false
+executable = "ffmpeg"
+model_ids = ["ffmpeg/motion-v1"]
+model_version = "replace-with-fixed-ffmpeg-version"
+workflow_version = "ffmpeg-motion-v1"
+max_segment_seconds = 5.0
+overlap_frames = 8
+timeout_seconds = 300

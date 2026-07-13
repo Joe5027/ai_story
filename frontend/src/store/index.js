@@ -1,5 +1,4 @@
-import Vue from 'vue';
-import Vuex from 'vuex';
+import { createStore } from 'vuex';
 
 import auth from './modules/auth';
 import projects from './modules/projects';
@@ -10,9 +9,7 @@ import screenplays from './modules/screenplays';
 import ui from './modules/ui';
 import assistant from './modules/assistant';
 
-Vue.use(Vuex);
-
-export default new Vuex.Store({
+export default createStore({
   state: {
     loading: false,
     error: null,

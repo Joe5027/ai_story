@@ -515,6 +515,7 @@ class ImageEditStageExecutionTestCase(APITestCase):
         provider = ModelProvider.objects.create(
             name='Mock Image Edit API',
             provider_type='image_edit',
+            deployment_mode='mock',
             api_url='https://example.com/edit',
             api_key='test-key',
             model_name='mock-image-edit',

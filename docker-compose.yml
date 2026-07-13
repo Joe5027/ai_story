@@ -1,8 +1,27 @@
 services:
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ai_story
+      POSTGRES_USER: ai_story
+      POSTGRES_PASSWORD: ai_story_dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_story -d ai_story"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   # Redis缓存和消息队列
   redis:
     image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 
   # Django后端
@@ -12,9 +31,17 @@ services:
       dockerfile: docker/Dockerfile
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://ai_story:ai_story_dev@postgres:5432/ai_story
       - REDIS_HOST=redis
+      - AI_RUNTIME_AGENT_URL=http://host.docker.internal:9100
+      - AI_RUNTIME_AGENT_TOKEN=${AI_RUNTIME_AGENT_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   # Celery Worker
   celery:
@@ -26,9 +53,34 @@ services:
       - ./backend:/app/backend
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://ai_story:ai_story_dev@postgres:5432/ai_story
+      - REDIS_HOST=redis
+      - AI_RUNTIME_AGENT_URL=http://host.docker.internal:9100
+      - AI_RUNTIME_AGENT_TOKEN=${AI_RUNTIME_AGENT_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: celery -A config beat -l info
+    volumes:
+      - ./backend:/app/backend
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://ai_story:ai_story_dev@postgres:5432/ai_story
       - REDIS_HOST=redis
     depends_on:
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   # Vue前端
   frontend:
@@ -39,4 +91,7 @@ services:
       - "3000:3000"
     depends_on:
       - backend
+
+volumes:
+  postgres_data:
 

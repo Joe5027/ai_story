@@ -107,12 +107,20 @@
                 {{ provider.model_name }}
               </p>
             </div>
-            <span
-              class="badge badge-sm card-type-badge"
-              :class="getProviderTypeBadgeClass(provider.provider_type)"
-            >
-              {{ getProviderTypeLabel(provider.provider_type) }}
-            </span>
+            <div class="card-badges">
+              <span
+                class="badge badge-sm card-mode-badge"
+                :class="`mode-${provider.deployment_mode || 'api'}`"
+              >
+                {{ getDeploymentModeLabel(provider.deployment_mode) }}
+              </span>
+              <span
+                class="badge badge-sm card-type-badge"
+                :class="getProviderTypeBadgeClass(provider.provider_type)"
+              >
+                {{ getProviderTypeLabel(provider.provider_type) }}
+              </span>
+            </div>
           </div>
 
           <div class="card-meta compact-meta">
@@ -126,9 +134,23 @@
               </span>
             </div>
             <div class="meta-item meta-item-right">
-              <span class="meta-label">更新</span>
-              <span class="meta-value meta-time">{{ formatDate(provider.updated_at) }}</span>
+              <span class="meta-label">健康</span>
+              <span
+                class="health-state"
+                :class="`health-${provider.health_status || 'unknown'}`"
+              >
+                {{ getHealthLabel(provider.health_status) }}
+              </span>
             </div>
+          </div>
+
+          <div
+            v-if="provider.deployment_mode === 'local'"
+            class="runtime-line"
+          >
+            <span>运行节点</span>
+            <strong>{{ provider.runtime_node_name || '未绑定' }}</strong>
+            <small>{{ provider.runtime_model_id || provider.model_name }}</small>
           </div>
 
           <div class="card-footer">
@@ -147,7 +169,7 @@
                   class="action-spinner"
                   aria-hidden="true"
                 />
-                <span>{{ testingProviderId === provider.id ? '测试中...' : '测试' }}</span>
+                <span>{{ testingProviderId === provider.id ? '检查中...' : '健康检查' }}</span>
               </button>
               <button
                 class="ghost-action"
@@ -214,7 +236,8 @@ export default {
         { label: 'LLM模型', value: 'llm' },
         { label: '文生图模型', value: 'text2image' },
         { label: '图生视频模型', value: 'image2video' },
-        { label: '图片编辑模型', value: 'image_edit' }
+        { label: '图片编辑模型', value: 'image_edit' },
+        { label: '静态运镜', value: 'motion_render' }
       ],
       statusOptions: [
         { label: '全部状态', value: '' },
@@ -234,7 +257,7 @@ export default {
   created() {
     this.loadProviders()
   },
-  beforeDestroy() {
+  beforeUnmount() {
     clearTimeout(this.searchTimer)
   },
   methods: {
@@ -321,20 +344,24 @@ export default {
       this.testingProviderId = provider.id
       try {
         const result = await this.testProviderConnection({
-          id: provider.id,
-          testPrompt: '你好啊？'
+          id: provider.id
         })
 
         if (result.success) {
-          await this.$alert(`测试成功! 延迟: ${result.latency_ms}ms, 返回结果: ${result.response}`, '测试结果', { tone: 'success' })
+          const latency = result.latency_ms !== undefined ? `，延迟 ${result.latency_ms}ms` : ''
+          await this.$alert(`健康检查通过${latency}。本次没有生成内容。`, '连接正常', { tone: 'success' })
         } else {
-          await this.$alert(`测试失败: ${result.error}`, '测试结果', { tone: 'error' })
+          await this.$alert(`健康检查失败：${result.error || result.message || '服务不可用'}`, '连接失败', { tone: 'error' })
         }
       } catch (error) {
         console.error('测试连接失败:', error)
         const backendError = error?.response?.data?.error
         const backendMessage = error?.response?.data?.message
-        await this.$alert(backendError || backendMessage || '测试连接失败', '测试结果', { tone: 'error' })
+        await this.$alert(
+          (typeof backendError === 'string' ? backendError : backendError?.message) || backendMessage || '测试连接失败',
+          '测试结果',
+          { tone: 'error' }
+        )
       } finally {
         this.testingProviderId = null
       }
@@ -380,7 +407,8 @@ export default {
         llm: 'LLM',
         text2image: '文生图',
         image2video: '图生视频',
-        image_edit: '图片编辑'
+        image_edit: '图片编辑',
+        motion_render: '静态运镜'
       }
       return labels[type] || type
     },
@@ -390,9 +418,27 @@ export default {
         llm: 'badge-primary',
         text2image: 'badge-info',
         image2video: 'badge-accent',
-        image_edit: 'badge-secondary'
+        image_edit: 'badge-secondary',
+        motion_render: 'badge-neutral'
       }
       return classes[type] || 'badge-ghost'
+    },
+
+    getDeploymentModeLabel(mode) {
+      return {
+        local: '本地',
+        api: 'API',
+        mock: 'Mock'
+      }[mode] || 'API'
+    },
+
+    getHealthLabel(status) {
+      return {
+        healthy: '健康',
+        degraded: '降级',
+        unavailable: '不可用',
+        unknown: '未知'
+      }[status] || '未知'
     }
   }
 }
@@ -675,6 +721,44 @@ export default {
   white-space: nowrap;
 }
 
+.card-badges {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.card-mode-badge.mode-local {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.28);
+  color: #047857;
+}
+
+.card-mode-badge.mode-api {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.25);
+  color: #1d4ed8;
+}
+
+.card-mode-badge.mode-mock {
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.28);
+  color: #b45309;
+}
+
+.layout-shell.theme-dark .card-mode-badge.mode-local {
+  color: #6ee7b7;
+}
+
+.layout-shell.theme-dark .card-mode-badge.mode-api {
+  color: #93c5fd;
+}
+
+.layout-shell.theme-dark .card-mode-badge.mode-mock {
+  color: #fcd34d;
+}
+
 .card-title {
   margin: 0;
   font-size: 1rem;
@@ -738,6 +822,68 @@ export default {
 
 .meta-time {
   font-size: 0.8rem;
+}
+
+.health-state {
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.health-state.health-healthy {
+  color: #059669;
+}
+
+.health-state.health-degraded {
+  color: #d97706;
+}
+
+.health-state.health-unavailable {
+  color: #dc2626;
+}
+
+.health-state.health-unknown {
+  color: #64748b;
+}
+
+.layout-shell.theme-dark .health-state.health-healthy {
+  color: #6ee7b7;
+}
+
+.layout-shell.theme-dark .health-state.health-degraded {
+  color: #fcd34d;
+}
+
+.layout-shell.theme-dark .health-state.health-unavailable {
+  color: #fca5a5;
+}
+
+.runtime-line {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0.2rem 0.65rem;
+  padding: 0.65rem 0.8rem;
+  border-left: 3px solid rgba(20, 184, 166, 0.55);
+  border-radius: 0 10px 10px 0;
+  background: rgba(20, 184, 166, 0.08);
+  font-size: 0.78rem;
+}
+
+.runtime-line > span,
+.runtime-line > small {
+  color: #64748b;
+}
+
+.runtime-line > small {
+  grid-column: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layout-shell.theme-dark .runtime-line > span,
+.layout-shell.theme-dark .runtime-line > small {
+  color: #94a3b8;
 }
 
 .card-footer {

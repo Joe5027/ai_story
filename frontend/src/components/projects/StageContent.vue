@@ -405,7 +405,7 @@ export default {
       },
     },
   },
-  beforeDestroy() {
+  beforeUnmount() {
     // 组件销毁时断开SSE连接
     this.disconnectSSE();
   },

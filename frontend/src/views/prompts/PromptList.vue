@@ -293,7 +293,7 @@ export default {
   created() {
     this.fetchData();
   },
-  beforeDestroy() {
+  beforeUnmount() {
     clearTimeout(this.searchTimer);
   },
   methods: {

@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-13",
+  "notice": "安全模板默认全部禁止下载。启用前必须从官方来源固定版本、HTTPS URL、精确字节数、SHA-256、许可证和安装目标。",
+  "components": [
+    {
+      "id": "ollama-windows-installer",
+      "name": "Ollama Windows 安装包",
+      "component": "ollama",
+      "version": "PIN-OFFICIAL-VERSION-BEFORE-ENABLE",
+      "license": "待固定版本后复核",
+      "license_url": "https://github.com/ollama/ollama",
+      "size_display": "启用前填写",
+      "size_bytes": null,
+      "url": "https://example.invalid/OllamaSetup.exe",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "file_name": "OllamaSetup-PINNED.exe",
+      "install_mode": "download_only",
+      "target_relative_path": "ollama/PINNED_VERSION",
+      "download_enabled": false
+    },
+    {
+      "id": "comfyui-windows-portable",
+      "name": "ComfyUI Windows Portable",
+      "component": "comfyui",
+      "version": "PIN-OFFICIAL-COMMIT-BEFORE-ENABLE",
+      "license": "待固定版本后复核",
+      "license_url": "https://github.com/comfy-org/ComfyUI",
+      "size_display": "启用前填写",
+      "size_bytes": null,
+      "url": "https://example.invalid/ComfyUI_windows_portable.zip",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "file_name": "ComfyUI-windows-PINNED.zip",
+      "install_mode": "archive",
+      "target_relative_path": "comfyui/PINNED_VERSION",
+      "download_enabled": false
+    },
+    {
+      "id": "lightx2v-windows-runtime",
+      "name": "LightX2V Windows 固定运行包",
+      "component": "lightx2v",
+      "version": "PIN-OFFICIAL-COMMIT-BEFORE-ENABLE",
+      "license": "待固定版本后复核",
+      "license_url": "https://github.com/ModelTC/LightX2V",
+      "size_display": "启用前填写",
+      "size_bytes": null,
+      "url": "https://example.invalid/LightX2V-windows.zip",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "file_name": "LightX2V-windows-PINNED.zip",
+      "install_mode": "archive",
+      "target_relative_path": "lightx2v/PINNED_VERSION",
+      "download_enabled": false
+    },
+    {
+      "id": "ffmpeg-windows-runtime",
+      "name": "FFmpeg Windows 固定运行包",
+      "component": "ffmpeg",
+      "version": "PIN-OFFICIAL-BUILD-BEFORE-ENABLE",
+      "license": "待固定版本后复核",
+      "license_url": "https://ffmpeg.org/legal.html",
+      "size_display": "启用前填写",
+      "size_bytes": null,
+      "url": "https://example.invalid/ffmpeg-windows.zip",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "file_name": "ffmpeg-windows-PINNED.zip",
+      "install_mode": "archive",
+      "target_relative_path": "ffmpeg/PINNED_VERSION",
+      "download_enabled": false
+    }
+  ]
+}

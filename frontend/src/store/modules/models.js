@@ -287,10 +287,12 @@ const actions = {
   /**
    * 测试模型提供商连接
    */
-  async testProviderConnection({ commit }, { id, testPrompt }) {
+  async testProviderConnection({ commit }, { id, payload = null, testPrompt = null }) {
     commit('SET_LOADING', { key: 'testing', value: true })
     try {
-      const response = await modelProviderApi.testProviderConnection(id, testPrompt)
+      // 默认只执行不生成内容的健康检查；付费 smoke 必须由专门确认流程传入 payload。
+      const requestPayload = payload || (testPrompt ? { test_prompt: testPrompt } : {})
+      const response = await modelProviderApi.testProviderConnection(id, requestPayload)
       return response
     } catch (error) {
       console.error('测试模型提供商连接失败:', error)

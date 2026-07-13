@@ -272,7 +272,7 @@ export default {
       return Boolean(this.expandedPatches[messageId]);
     },
     togglePatchExpanded(messageId) {
-      this.$set(this.expandedPatches, messageId, !this.isPatchExpanded(messageId));
+      this.expandedPatches[messageId] = !this.isPatchExpanded(messageId);
     },
     formatPatch(patch) {
       try {

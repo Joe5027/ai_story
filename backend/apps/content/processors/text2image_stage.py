@@ -24,6 +24,7 @@ from core.pipeline.base import PipelineContext, StageProcessor
 from django.utils import timezone
 
 from apps.content.models import GeneratedImage, Storyboard
+from apps.inference.services.hybrid import HybridInferenceService
 from apps.models.models import ModelProvider
 from apps.projects.models import Project, ProjectStage
 from apps.prompts.client_param_resolver import resolve_stage_client_params
@@ -774,24 +775,54 @@ class Text2ImageStageProcessor(StageProcessor):
                 'negative_prompt': client_params.get('negative_prompt', ''),
                 'sample_count': client_params.get('sample_count', 1),
             }
-            client = create_ai_client(provider)
-            response = ImageGenerationService.generate(
-                provider=provider,
-                client=client,
-                request=Text2ImageRequest(
-                    prompt=prompt,
-                    negative_prompt=client_params.get('negative_prompt', ''),
-                    reference_images=prompt_payload['image'],
-                    aspect_ratio=client_params.get('ratio', ratio or '1:1'),
-                    width=client_params.get('width', 1024),
-                    height=client_params.get('height', 1024),
-                    sample_count=client_params.get('sample_count', 1),
-                    extra={
-                        'resolution': client_params.get('resolution', resolution or '2k'),
-                        'steps': client_params.get('steps', 20),
-                    },
-                ),
+            request_parameters = {
+                **generation_params,
+                'reference_images': prompt_payload['image'],
+                'output_spec': {
+                    'width': client_params.get('width', 1024),
+                    'height': client_params.get('height', 1024),
+                    'sample_count': client_params.get('sample_count', 1),
+                },
+            }
+
+            def invoke(selected_provider, parameters, _repaired_structure):
+                # 付费客户端只能在 HybridInferenceService 已完成云授权、价格和
+                # 预算预留后创建；这里保留 explicit_provider 以兼容旧项目配置。
+                client = create_ai_client(selected_provider)
+                return ImageGenerationService.generate(
+                    provider=selected_provider,
+                    client=client,
+                    request=Text2ImageRequest(
+                        prompt=parameters['prompt'],
+                        negative_prompt=parameters.get('negative_prompt', ''),
+                        reference_images=parameters.get('reference_images', []),
+                        aspect_ratio=parameters.get('ratio', '1:1'),
+                        width=parameters.get('width', 1024),
+                        height=parameters.get('height', 1024),
+                        sample_count=parameters.get('sample_count', 1),
+                        extra={
+                            'resolution': parameters.get('resolution', '2k'),
+                            'steps': parameters.get('steps', 20),
+                        },
+                    ),
+                )
+
+            execution = HybridInferenceService.execute(
+                project=project,
+                capability='text2image',
+                stage_type=self.stage_type,
+                explicit_provider=provider,
+                manual_api=False,
+                request_parameters=request_parameters,
+                usage_estimate={
+                    'request_count': 1,
+                    'image_count': client_params.get('sample_count', 1),
+                    'width': client_params.get('width', 1024),
+                    'height': client_params.get('height', 1024),
+                },
+                invoke=invoke,
             )
+            response = execution.value
 
             if not response:
                 logger.error(f"分镜 {storyboard.get('scene_number')} 图片生成返回空结果")

@@ -153,7 +153,7 @@ export default {
       this.lastFitSignature = this.getLayoutSignature();
     });
   },
-  beforeDestroy() {
+  beforeUnmount() {
     this.clearViewAnimationTimer();
   },
   methods: {

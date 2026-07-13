@@ -7,6 +7,7 @@
 import inspect
 import base64
 import requests
+from contextlib import nullcontext
 from typing import Dict, Any, Optional, List, Iterable
 from pathlib import Path
 from django.db import transaction
@@ -17,6 +18,10 @@ from .opencode_config import OpencodeConfigSyncService
 from .vendor_catalog import VENDOR_CATALOG
 from urllib.parse import urlparse
 from core.ai_client.image_service import ImageGenerationService
+from core.ai_client.outbound_guard import (
+    allow_paid_provider_client,
+    require_paid_provider_authorization,
+)
 from core.ai_client.schemas import ImageEditRequest, Text2ImageRequest
 
 
@@ -26,6 +31,7 @@ CAPABILITY_LABELS = {
     'text2image': '文生图',
     'image2video': '图生视频',
     'image_edit': '图片编辑',
+    'motion_render': '非生成式视频运镜',
 }
 
 CAPABILITY_CLASSIFICATION_PATTERNS = {
@@ -256,16 +262,18 @@ class ModelProviderService:
         api_key: str,
         api_url: Optional[str] = None,
     ) -> VendorConnectionConfig:
-        """保存用户的厂商导入连接配置。"""
-        config, _ = VendorConnectionConfig.objects.update_or_create(
+        """保存厂商配置；空密钥表示保持旧值，避免脱敏编辑页误清空。"""
+        config, _ = VendorConnectionConfig.objects.select_for_update().get_or_create(
             user=user,
             vendor=vendor,
             capability=capability,
-            defaults={
-                'api_key': (api_key or '').strip(),
-                'api_url': (api_url or '').strip(),
-            }
         )
+        next_key = (api_key or '').strip()
+        if next_key:
+            config.api_key = next_key
+        if api_url is not None:
+            config.api_url = (api_url or '').strip()
+        config.save(update_fields=['api_key', 'api_url', 'updated_at'])
         return config
 
     @staticmethod
@@ -511,6 +519,7 @@ class ModelProviderService:
 
         Args:
             provider_id: 提供商ID
+            user: 当前请求用户；staff 可查看全局，普通用户仅可查看自己的项目
             data: 更新数据
 
         Returns:
@@ -574,7 +583,7 @@ class ModelProviderService:
         return OpencodeConfigSyncService.get_status()
 
     @staticmethod
-    def get_provider_statistics(provider_id: str) -> Dict[str, Any]:
+    def get_provider_statistics(provider_id: str, user) -> Dict[str, Any]:
         """
         获取模型提供商统计信息
 
@@ -585,24 +594,27 @@ class ModelProviderService:
             统计信息字典
         """
         provider = ModelProvider.objects.get(id=provider_id)
+        usage_logs = ModelUsageLogService.visible_to(user).filter(
+            model_provider=provider
+        )
 
         # 总调用次数
-        total_count = provider.usage_logs.count()
+        total_count = usage_logs.count()
 
         # 成功/失败次数
-        success_count = provider.usage_logs.filter(status='success').count()
-        failed_count = provider.usage_logs.filter(status='failed').count()
+        success_count = usage_logs.filter(status='success').count()
+        failed_count = usage_logs.filter(status='failed').count()
 
         # 成功率
         success_rate = (success_count / total_count * 100) if total_count > 0 else 0
 
         # 平均延迟
-        avg_latency = provider.usage_logs.aggregate(
+        avg_latency = usage_logs.aggregate(
             avg=Avg('latency_ms')
         )['avg'] or 0
 
         # 总Token使用量
-        total_tokens = provider.usage_logs.aggregate(
+        total_tokens = usage_logs.aggregate(
             total=Sum('tokens_used')
         )['total'] or 0
 
@@ -610,7 +622,7 @@ class ModelProviderService:
         from django.utils import timezone
         from datetime import timedelta
         seven_days_ago = timezone.now() - timedelta(days=7)
-        recent_count = provider.usage_logs.filter(
+        recent_count = usage_logs.filter(
             created_at__gte=seven_days_ago
         ).count()
 
@@ -643,7 +655,13 @@ class ModelProviderService:
         test_image_mime_type: str = 'image/jpeg',
     ) -> Dict[str, Any]:
         """构造测试请求日志，避免写入整段图片 base64。"""
-        request_data: Dict[str, Any] = {'test_prompt': test_prompt}
+        import hashlib
+
+        prompt_bytes = (test_prompt or '').encode('utf-8')
+        request_data: Dict[str, Any] = {
+            'test_prompt_sha256': hashlib.sha256(prompt_bytes).hexdigest(),
+            'test_prompt_length': len(test_prompt or ''),
+        }
         if test_image_url:
             request_data['test_image_url'] = test_image_url
         if test_image_base64:
@@ -653,12 +671,148 @@ class ModelProviderService:
         return request_data
 
     @staticmethod
+    def check_provider_health(provider_id: str) -> Dict[str, Any]:
+        """执行不生成内容的健康检查，避免“测试连接”本身产生模型费用。"""
+        import time
+
+        provider = ModelProvider.objects.select_related('runtime_node').get(id=provider_id)
+        if not provider.is_active:
+            return {'success': False, 'reachable': False, 'error': '模型提供商未激活'}
+
+        started = time.monotonic()
+        if provider.deployment_mode == 'mock':
+            result = {'success': True, 'reachable': True, 'status_code': 200, 'mode': 'mock'}
+        else:
+            if provider.deployment_mode == 'local':
+                node = provider.runtime_node
+                base_url = (
+                    getattr(node, 'agent_url', '')
+                    or getattr(node, 'endpoint', '')
+                    or provider.api_url
+                ).rstrip('/')
+                url = f'{base_url}/v1/health/ready'
+                token = getattr(node, 'access_token', '') or provider.api_key
+            else:
+                url = ModelProviderService._derive_models_endpoint(provider.api_url)
+                token = provider.api_key
+
+            try:
+                headers = {'Authorization': f'Bearer {token}'} if token else {}
+                guard = (
+                    allow_paid_provider_client(reason='non_billable_health')
+                    if provider.deployment_mode == 'api'
+                    else nullcontext()
+                )
+                # 该授权范围只包含 GET 健康/模型列表请求，严禁在这里调用任何
+                # generate/submit 接口；真实生成必须进入 Hybrid 或专用 smoke 门。
+                with guard:
+                    response = requests.get(url, headers=headers, timeout=min(provider.timeout, 10))
+                reachable = response.status_code < 500
+                success = 200 <= response.status_code < 300
+                result = {
+                    'success': success,
+                    'reachable': reachable,
+                    'status_code': response.status_code,
+                    'mode': provider.deployment_mode,
+                    'error': '' if success else f'健康检查返回 HTTP {response.status_code}',
+                }
+            except requests.RequestException as error:
+                result = {
+                    'success': False,
+                    'reachable': False,
+                    'mode': provider.deployment_mode,
+                    'error': str(error),
+                }
+
+        result['latency_ms'] = int((time.monotonic() - started) * 1000)
+        provider.health_status = (
+            'healthy' if result['success'] else 'degraded' if result.get('reachable') else 'unavailable'
+        )
+        provider.save(update_fields=['health_status', 'updated_at'])
+        return result
+
+    @staticmethod
+    @transaction.atomic
+    def authorize_billable_smoke(provider: ModelProvider, confirmed_max_cost_cny) -> Dict[str, Any]:
+        """在真实生成 smoke 前锁定工具预算并验证手工价目表。
+
+        该入口不接受“先调用再记账”。缺少价格或工具预算为 0 时必须在任何
+        外部 POST 之前失败，确保默认安装不可能因连接测试产生费用。
+        """
+        from decimal import Decimal
+        from django.utils import timezone
+        from apps.inference.models import AIBudgetPolicy
+        from apps.inference.services.pricing import PricingService
+
+        usage = {'request_count': 1}
+        if provider.provider_type == 'llm':
+            usage.update({'input_tokens': 1000, 'output_tokens': 200})
+        elif provider.provider_type in {'text2image', 'image_edit'}:
+            extra = provider.extra_config or {}
+            usage.update({
+                'image_count': 1,
+                'width': extra.get('width', 1024),
+                'height': extra.get('height', 1024),
+            })
+        elif provider.provider_type == 'image2video':
+            usage['video_seconds'] = (provider.extra_config or {}).get('duration', 5)
+
+        estimate = PricingService.estimate(
+            provider.provider_type,
+            provider.model_name,
+            usage,
+            provider=provider,
+        )
+        if not estimate.lines or estimate.missing_usage:
+            raise ValueError('PRICE_MISSING: 未找到完整的手工价目表')
+        confirmed = Decimal(str(confirmed_max_cost_cny))
+        if estimate.amount_cny > confirmed:
+            raise ValueError(f'BUDGET_DENIED: 预计费用 {estimate.amount_cny} CNY 超过确认上限')
+
+        policy_query = AIBudgetPolicy.objects.filter(is_active=True).order_by('created_at')
+        if transaction.get_connection().features.has_select_for_update:
+            policy_query = policy_query.select_for_update()
+        policy = policy_query.first()
+        tooling_limit = getattr(policy, 'tooling_limit', Decimal('0')) if policy else Decimal('0')
+        today = timezone.localdate()
+        spent = ModelUsageLog.objects.filter(
+            stage_type='billable_smoke',
+            created_at__date=today,
+            status__in=['reserved', 'success', 'manual_review'],
+        ).aggregate(total=Sum('settled_cost'))['total'] or Decimal('0')
+        tooling_limit = getattr(policy, 'tooling_limit_cny', tooling_limit) if policy else tooling_limit
+        if tooling_limit <= 0 or spent + estimate.amount_cny > tooling_limit:
+            raise ValueError('BUDGET_DENIED: 工具调试预算不足或仍为默认 0')
+        reservation_log = ModelUsageLog.objects.create(
+            model_provider=provider,
+            request_data={},
+            response_data={},
+            request_summary={'kind': 'billable_smoke', 'usage': usage},
+            status='reserved',
+            stage_type='billable_smoke',
+            deployment_mode='api',
+            estimated_cost=estimate.amount_cny,
+            # 预留也计入占用；成功后按真实 usage 结算，异常时保留供人工核对。
+            settled_cost=estimate.amount_cny,
+            currency='CNY',
+            idempotency_key=str(__import__('uuid').uuid4()),
+        )
+        return {
+            'estimate': estimate.amount_cny,
+            'currency': 'CNY',
+            'usage': usage,
+            'usage_log_id': reservation_log.pk,
+        }
+
+    @staticmethod
     async def test_provider_connection(
         provider_id: str,
         test_prompt: str = "Hello, this is a test.",
         test_image_url: str = '',
         test_image_base64: str = '',
         test_image_mime_type: str = 'image/jpeg',
+        usage_log_id=None,
+        stage_type: str = 'test',
     ) -> Dict[str, Any]:
         """
         测试模型提供商连接
@@ -684,57 +838,75 @@ class ModelProviderService:
         start_time = time.time()
 
         try:
-            # 根据提供商类型选择测试方法
-            if provider.provider_type == 'llm':
-                result = ModelProviderService._test_llm_provider(
-                    provider,
-                    test_prompt
+            smoke_authorized = bool(
+                provider.deployment_mode == 'api'
+                and stage_type == 'billable_smoke'
+                and usage_log_id
+            )
+            guard = (
+                allow_paid_provider_client(
+                    reason='billable_smoke', reservation_id=str(usage_log_id)
                 )
-            elif provider.provider_type == 'text2image':
-                test_prompt = "图片生成：生成一只小狗的照片"
-                result = await ModelProviderService._test_text2image_provider(
-                    provider,
-                    test_prompt
-                )
-            elif provider.provider_type == 'image2video':
-                result = await ModelProviderService._test_image2video_provider(
-                    provider,
-                    test_prompt,
-                    test_image_url=test_image_url,
-                    test_image_base64=test_image_base64,
-                    test_image_mime_type=test_image_mime_type,
-                )
-            elif provider.provider_type == 'image_edit':
-                test_prompt = '图片编辑测试：提升图片清晰度并补充细节'
-                result = await ModelProviderService._test_image_edit_provider(
-                    provider,
-                    test_prompt,
-                )
-            else:
-                return {
-                    'success': False,
-                    'error': f'不支持的提供商类型: {provider.provider_type}'
-                }
+                if smoke_authorized
+                else nullcontext()
+            )
+            # 只有价目表、工具预算和用户费用确认都已生成 reservation log 的
+            # billable_smoke 可以进入此例外；普通业务生成不得复用该上下文。
+            with guard:
+                if provider.provider_type == 'llm':
+                    result = ModelProviderService._test_llm_provider(
+                        provider,
+                        test_prompt
+                    )
+                elif provider.provider_type == 'text2image':
+                    test_prompt = "图片生成：生成一只小狗的照片"
+                    result = await ModelProviderService._test_text2image_provider(
+                        provider,
+                        test_prompt
+                    )
+                elif provider.provider_type == 'image2video':
+                    result = await ModelProviderService._test_image2video_provider(
+                        provider,
+                        test_prompt,
+                        test_image_url=test_image_url,
+                        test_image_base64=test_image_base64,
+                        test_image_mime_type=test_image_mime_type,
+                    )
+                elif provider.provider_type == 'image_edit':
+                    test_prompt = '图片编辑测试：提升图片清晰度并补充细节'
+                    result = await ModelProviderService._test_image_edit_provider(
+                        provider,
+                        test_prompt,
+                    )
+                else:
+                    return {
+                        'success': False,
+                        'error': f'不支持的提供商类型: {provider.provider_type}'
+                    }
 
             # 计算延迟
             latency_ms = int((time.time() - start_time) * 1000)
 
-            # 记录使用日志
-            await sync_to_async(ModelUsageLog.objects.create)(
-                model_provider=provider,
-                request_data=ModelProviderService._build_test_request_log(
+            log_values = {
+                'model_provider': provider,
+                'request_data': ModelProviderService._build_test_request_log(
                     test_prompt=test_prompt,
                     test_image_url=test_image_url,
                     test_image_base64=test_image_base64,
                     test_image_mime_type=test_image_mime_type,
                 ),
-                response_data=result.get('data', {}),
-                tokens_used=result.get('tokens_used', 0),
-                latency_ms=latency_ms,
-                status='success' if result.get('success') else 'failed',
-                error_message=result.get('error', '暂无错误') or "暂无错误",
-                stage_type='test'
-            )
+                'response_data': result.get('data', {}),
+                'tokens_used': result.get('tokens_used', 0),
+                'latency_ms': latency_ms,
+                'status': 'success' if result.get('success') else 'failed',
+                'error_message': result.get('error', '暂无错误') or '暂无错误',
+                'stage_type': stage_type,
+            }
+            if usage_log_id:
+                log_values.pop('model_provider')
+                await sync_to_async(ModelUsageLog.objects.filter(pk=usage_log_id).update)(**log_values)
+            else:
+                await sync_to_async(ModelUsageLog.objects.create)(**log_values)
 
             return {
                 'success': result.get('success', False),
@@ -747,21 +919,25 @@ class ModelProviderService:
         except Exception as e:
             latency_ms = int((time.time() - start_time) * 1000)
 
-            # 记录失败日志
-            await sync_to_async(ModelUsageLog.objects.create)(
-                model_provider=provider,
-                request_data=ModelProviderService._build_test_request_log(
+            log_values = {
+                'model_provider': provider,
+                'request_data': ModelProviderService._build_test_request_log(
                     test_prompt=test_prompt,
                     test_image_url=test_image_url,
                     test_image_base64=test_image_base64,
                     test_image_mime_type=test_image_mime_type,
                 ),
-                response_data={},
-                latency_ms=latency_ms,
-                status='failed',
-                error_message=str(e),
-                stage_type='test'
-            )
+                'response_data': {},
+                'latency_ms': latency_ms,
+                'status': 'failed',
+                'error_message': str(e),
+                'stage_type': stage_type,
+            }
+            if usage_log_id:
+                log_values.pop('model_provider')
+                await sync_to_async(ModelUsageLog.objects.filter(pk=usage_log_id).update)(**log_values)
+            else:
+                await sync_to_async(ModelUsageLog.objects.create)(**log_values)
 
             return {
                 'success': False,
@@ -775,16 +951,9 @@ class ModelProviderService:
         prompt: str
     ) -> Dict[str, Any]:
         """测试LLM提供商"""
-        from core.ai_client.openai_client import OpenAIClient
+        from core.ai_client.factory import create_ai_client
 
-        client = OpenAIClient(
-            api_url=provider.api_url,
-            api_key=provider.api_key,
-            model_name=provider.model_name,
-            max_tokens=min(provider.max_tokens, 100),  # 测试时限制token数
-            temperature=provider.temperature,
-            timeout=provider.timeout
-        )
+        client = create_ai_client(provider)
         full_text = ""
         is_success = False
         error_message = None
@@ -868,7 +1037,11 @@ class ModelProviderService:
         from core.ai_client.mock_image2video_client import MockImage2VideoClient
         from core.ai_client.image2video_client import VideoGeneratorClient
         from core.ai_client.volcengine_image2video_client import VolcengineImage2VideoClient
+        from core.ai_client.siliconflow_video_client import SiliconFlowVideoClient
 
+        # 此方法存在直接实例化多个旧视频客户端的兼容分支，必须先应用与工厂
+        # 相同的出站授权检查，防止未来调用者绕过 create_ai_client。
+        require_paid_provider_authorization(provider)
         extra_config = provider.extra_config or {}
         used_default_test_image = False
 
@@ -937,10 +1110,13 @@ class ModelProviderService:
             'core.ai_client.image2video_client.VideoGeneratorClient',
             'core.ai_client.image2video_client.Image2VideoClient',
             'core.ai_client.volcengine_image2video_client.VolcengineImage2VideoClient',
+            'core.ai_client.siliconflow_video_client.SiliconFlowVideoClient',
         ):
             client_class = VideoGeneratorClient
             if executor_class_path == 'core.ai_client.volcengine_image2video_client.VolcengineImage2VideoClient':
                 client_class = VolcengineImage2VideoClient
+            elif executor_class_path == 'core.ai_client.siliconflow_video_client.SiliconFlowVideoClient':
+                client_class = SiliconFlowVideoClient
 
             client = await sync_to_async(client_class)(
                 api_url=provider.api_url,
@@ -1074,8 +1250,26 @@ class ModelUsageLogService:
     """
 
     @staticmethod
+    def visible_to(user):
+        """返回用户可见账本：普通用户仅项目内，staff 可审计全局。
+
+        ``project_id`` 为空的日志无法证明归属，普通用户必须不可见，避免连接
+        测试或旧调用记录成为跨用户侧信道。
+        """
+
+        if not user or not getattr(user, 'is_authenticated', False):
+            return ModelUsageLog.objects.none()
+        if getattr(user, 'is_staff', False):
+            return ModelUsageLog.objects.all()
+
+        from apps.projects.models import Project
+        project_ids = Project.objects.filter(user=user).values_list('id', flat=True)
+        return ModelUsageLog.objects.filter(project_id__in=project_ids)
+
+    @staticmethod
     def get_logs_by_provider(
         provider_id: str,
+        user,
         limit: int = 100
     ) -> List[ModelUsageLog]:
         """
@@ -1083,18 +1277,20 @@ class ModelUsageLogService:
 
         Args:
             provider_id: 提供商ID
+            user: 当前请求用户
             limit: 返回条数限制
 
         Returns:
             使用日志列表
         """
-        return ModelUsageLog.objects.filter(
+        return ModelUsageLogService.visible_to(user).filter(
             model_provider_id=provider_id
         ).order_by('-created_at')[:limit]
 
     @staticmethod
     def get_logs_by_project(
         project_id: str,
+        user,
         stage_type: Optional[str] = None
     ) -> List[ModelUsageLog]:
         """
@@ -1102,12 +1298,13 @@ class ModelUsageLogService:
 
         Args:
             project_id: 项目ID
+            user: 当前请求用户
             stage_type: 阶段类型
 
         Returns:
             使用日志列表
         """
-        queryset = ModelUsageLog.objects.filter(project_id=project_id)
+        queryset = ModelUsageLogService.visible_to(user).filter(project_id=project_id)
 
         if stage_type:
             queryset = queryset.filter(stage_type=stage_type)
@@ -1115,17 +1312,18 @@ class ModelUsageLogService:
         return queryset.order_by('-created_at')
 
     @staticmethod
-    def get_failed_logs(limit: int = 100) -> List[ModelUsageLog]:
+    def get_failed_logs(user, limit: int = 100) -> List[ModelUsageLog]:
         """
         获取失败的使用日志
 
         Args:
+            user: 当前请求用户
             limit: 返回条数限制
 
         Returns:
             失败日志列表
         """
-        return ModelUsageLog.objects.filter(
+        return ModelUsageLogService.visible_to(user).filter(
             status='failed'
         ).order_by('-created_at')[:limit]
 

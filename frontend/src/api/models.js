@@ -13,7 +13,7 @@ export const modelProviderApi = {
   /**
    * 获取模型提供商列表
    * @param {Object} params - 查询参数
-   * @param {string} params.provider_type - 提供商类型 (llm/text2image/image2video/image_edit)
+   * @param {string} params.provider_type - 提供商类型 (llm/text2image/image2video/image_edit/motion_render)
    * @param {boolean} params.is_active - 是否激活
    * @param {string} params.search - 搜索关键词
    * @param {string} params.ordering - 排序字段
@@ -91,13 +91,13 @@ export const modelProviderApi = {
   /**
    * 测试模型提供商连接
    * @param {string} id - 提供商ID
-   * @param {string|Object} payload - 测试提示词或测试参数对象
+   * @param {string|Object} payload - 可选的付费 smoke 参数；默认仅健康检查
    * @returns {Promise}
    */
-  testProviderConnection(id, payload = 'Hello, this is a test.') {
+  testProviderConnection(id, payload = {}) {
     const requestBody = typeof payload === 'string'
       ? { test_prompt: payload }
-      : { test_prompt: 'Hello, this is a test.', ...payload }
+      : { ...payload }
 
     return apiClient.post(`/models/providers/${id}/test_connection/`, requestBody)
   },
@@ -135,7 +135,7 @@ export const modelProviderApi = {
   /**
    * 获取简化的模型提供商列表(仅id和name) - 用于下拉选择
    * @param {Object} params - 查询参数
-   * @param {string} params.provider_type - 提供商类型 (llm/text2image/image2video/image_edit)
+   * @param {string} params.provider_type - 提供商类型 (llm/text2image/image2video/image_edit/motion_render)
    * @returns {Promise} - 返回 {count, results: [{id, name}]}
    */
   getSimpleList(params = {}) {

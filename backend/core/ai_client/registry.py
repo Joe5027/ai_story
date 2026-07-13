@@ -82,6 +82,9 @@ def get_base_class_for_provider_type(provider_type: str) -> Type[BaseAIClient]:
         'text2image': Text2ImageClient,
         'image2video': Image2VideoClient,
         'image_edit': ImageEditClient,
+        # motion_render 与图生视频共享视频响应抽象，但 Runtime Agent 内部走
+        # FFmpeg/RIFE CPU 资源组，不会误占生成式视频 Provider。
+        'motion_render': Image2VideoClient,
     }
 
     base_class = base_class_map.get(provider_type)

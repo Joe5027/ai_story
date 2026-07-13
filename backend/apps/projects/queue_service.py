@@ -24,10 +24,15 @@ def _project_task_cache_key(project_id: str) -> str:
 
 
 def _register_project_task(project_id: str, task_id: str) -> None:
-    task_ids = cache.get(_project_task_cache_key(project_id), [])
-    if task_id not in task_ids:
-        task_ids.append(task_id)
-    cache.set(_project_task_cache_key(project_id), task_ids, timeout=24 * 60 * 60)
+    try:
+        task_ids = cache.get(_project_task_cache_key(project_id), [])
+        if task_id not in task_ids:
+            task_ids.append(task_id)
+        cache.set(_project_task_cache_key(project_id), task_ids, timeout=24 * 60 * 60)
+    except Exception as error:
+        # Celery 消息和 EpisodeTaskQueue 已经是持久事实；辅助取消索引失败时
+        # 不能把已提交任务改成 failed，否则恢复器可能重复提交同一工作。
+        logger.warning('登记项目任务辅助缓存失败: %s', error)
 
 
 def _get_queue_position(queue_task: EpisodeTaskQueue) -> int:
@@ -86,7 +91,13 @@ def _get_recovery_final_status(queue_task: EpisodeTaskQueue) -> Optional[str]:
     if not queue_task.celery_task_id:
         return 'failed' if _is_queue_task_stale(queue_task) else None
 
-    task_state = AsyncResult(queue_task.celery_task_id).state
+    try:
+        task_state = AsyncResult(queue_task.celery_task_id).state
+    except Exception as error:
+        # 结果后端离线时无法证明任务终态，宁可保留 running 等待下一次对账，
+        # 也不能猜测失败并启动下一分集，避免两个任务并行或重复付费。
+        logger.warning('读取 Celery 任务终态失败，保留运行态: %s', error)
+        return None
     if task_state == 'SUCCESS':
         return 'completed'
     if task_state == 'FAILURE':
@@ -96,12 +107,17 @@ def _get_recovery_final_status(queue_task: EpisodeTaskQueue) -> Optional[str]:
     if task_state == 'RETRY':
         return None
 
+    # 新近启动的 PENDING/STARTED 任务尚未达到恢复阈值，不需要为每次排队请求
+    # 扫描所有 worker；既降低控制面开销，也避免 broker 短暂抖动影响正常排队。
+    if task_state in ['PENDING', 'STARTED'] and not _is_queue_task_stale(queue_task):
+        return None
+
     visible_to_workers = _is_task_visible_to_workers(queue_task.celery_task_id)
     if visible_to_workers is True:
         return None
     if visible_to_workers is None:
         return None
-    if task_state in ['PENDING', 'STARTED'] and _is_queue_task_stale(queue_task):
+    if task_state in ['PENDING', 'STARTED']:
         return 'failed'
     return None
 

@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "suite_id": "ai-story-local-ai-v1",
+  "status": "not_run",
+  "contains_secrets": false,
+  "result_root": "storage/benchmark-runs",
+  "report_path": "docs/local-ai/BENCHMARK_REPORT.md",
+  "required_run_metadata": [
+    "git_commit",
+    "case_file_sha256",
+    "runtime_agent_version",
+    "os",
+    "gpu",
+    "gpu_vram_bytes",
+    "system_ram_bytes",
+    "driver_version",
+    "model_id",
+    "model_digest",
+    "workflow_version",
+    "workflow_sha256",
+    "started_at",
+    "finished_at",
+    "peak_vram_bytes",
+    "peak_ram_bytes",
+    "terminal_status"
+  ],
+  "case_sets": [
+    {
+      "category": "text",
+      "path": "benchmarks/local-ai/text/chinese-storyboard.json",
+      "status": "not_run"
+    },
+    {
+      "category": "image_edit",
+      "path": "benchmarks/local-ai/image-edit/character-consistency.json",
+      "status": "not_run"
+    },
+    {
+      "category": "video_motion",
+      "path": "benchmarks/local-ai/video-motion/camera-motions.json",
+      "status": "not_run"
+    }
+  ]
+}

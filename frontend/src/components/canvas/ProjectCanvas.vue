@@ -160,6 +160,33 @@
         </div>
 
         <div
+          v-if="storyboards.length"
+          class="ui-chip-block ui-action-chip"
+        >
+          <button
+            class="btn btn-ghost btn-sm gap-2"
+            title="主观质量不满意时，选择具体工作项并确认最大 API 费用"
+            @click.stop="openApiRegenerationControl"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-4 w-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9M20 20v-5h-.581m0 0a8.003 8.003 0 01-15.357-2"
+              />
+            </svg>
+            API 重生成
+          </button>
+        </div>
+
+        <div
           v-if="project.jianying_draft_path"
           class="draft-info ui-chip-block"
         >
@@ -456,6 +483,7 @@
           :data="assetExtractionStage ? assetExtractionStage.domain_data : null"
           :project-id="project.id"
           :available-assets="availableAssets"
+          :image-provider="primaryImageProvider"
           @execute="handleExecuteStage"
           @asset-bindings-updated="handleAssetExtractionBindingsUpdated"
           @node-dblclick="focusCanvasNode('assetExtraction')"
@@ -666,6 +694,11 @@ import projectsAPI from '@/api/projects';
 import store from '@/store';
 import { promptTemplateAPI, STAGE_TYPES } from '@/api/prompts';
 import { formatDate } from '@/utils/helpers';
+import {
+  confirmPaidGeneration,
+  getPaidConfirmationDemand,
+  isPaidConfirmationRequired,
+} from '@/services/paidGenerationGuard';
 
 export default {
   name: 'ProjectCanvas',
@@ -700,6 +733,10 @@ export default {
     episodes: {
       type: Array,
       default: () => []
+    },
+    beforeRunPipeline: {
+      type: Function,
+      default: null
     }
   },
   data() {
@@ -772,6 +809,9 @@ export default {
     };
   },
   computed: {
+    primaryImageProvider() {
+      return this.modelConfig?.image_providers_detail?.[0] || null;
+    },
     // 截断项目名称
     truncatedProjectName() {
       const maxLength = 10;
@@ -1296,19 +1336,19 @@ export default {
         // 检查并清除已完成的执行状态
         newVal.forEach(storyboard => {
           if (storyboard.image_generation?.images && storyboard.image_generation.images.length > 0) {
-            this.$set(this.executingNodes.images, storyboard.id, false);
+            this.executingNodes.images[storyboard.id] = false;
           }
           if (storyboard.multi_grid_image?.tasks && storyboard.multi_grid_image.tasks.length > 0) {
-            this.$set(this.executingNodes.multiGridImages, storyboard.id, false);
+            this.executingNodes.multiGridImages[storyboard.id] = false;
           }
           if (storyboard.image_edit?.results && storyboard.image_edit.results.length > 0) {
-            this.$set(this.executingNodes.imageEdits, storyboard.id, false);
+            this.executingNodes.imageEdits[storyboard.id] = false;
           }
           if (storyboard.camera_movement?.data) {
-            this.$set(this.executingNodes.cameras, storyboard.id, false);
+            this.executingNodes.cameras[storyboard.id] = false;
           }
           if (storyboard.video_generation?.videos && storyboard.video_generation.videos.length > 0) {
-            this.$set(this.executingNodes.videos, storyboard.id, false);
+            this.executingNodes.videos[storyboard.id] = false;
           }
         });
 
@@ -1361,7 +1401,7 @@ export default {
     console.log('[ProjectCanvas] Storyboards:', this.storyboards);
     console.log('[ProjectCanvas] AllNodePositions:', this.allNodePositions);
   },
-  beforeDestroy() {
+  beforeUnmount() {
     document.removeEventListener('click', this.handleDocumentClick);
     if (this.resizeFlushFrame) {
       cancelAnimationFrame(this.resizeFlushFrame);
@@ -1408,7 +1448,7 @@ export default {
           if (!pendingHeight || this.measuredNodeHeights[pendingNodeKey] === pendingHeight) {
             return;
           }
-          this.$set(this.measuredNodeHeights, pendingNodeKey, pendingHeight);
+          this.measuredNodeHeights[pendingNodeKey] = pendingHeight;
         });
       });
     },
@@ -1708,12 +1748,65 @@ export default {
       const requestId = this.nodeChat.streamRequestId;
 
       try {
-        const initResponse = await projectsAPI.initNodeChat(this.project.id, {
+        const chatPayload = {
           node_type: this.nodeChat.type,
           node_id: this.nodeChat.nodeId,
           user_message: message,
           messages: historyMessages,
-        });
+        };
+        let initResponse;
+        try {
+          initResponse = await projectsAPI.initNodeChat(
+            this.project.id,
+            chatPayload,
+            { suppressGlobalError: true }
+          );
+        } catch (error) {
+          if (!isPaidConfirmationRequired(error)) {
+            throw error;
+          }
+          const paidDemand = getPaidConfirmationDemand(error);
+          const providerField = this.nodeChat.type === 'camera_movement'
+            ? 'camera_providers'
+            : 'storyboard_providers';
+          const providerId = paidDemand.provider_id
+            || this.modelConfig?.[providerField]?.[0]
+            || null;
+          const paidConfirmation = await confirmPaidGeneration({
+            projectId: this.project.id,
+            capability: paidDemand.capability || 'llm',
+            stageType: paidDemand.stage_type || `${this.nodeChat.type}_chat`,
+            taskCount: 1,
+            usagePerItem: {
+              request_count: 1,
+              ...(paidDemand.usage_per_item || {}),
+              input_tokens: Math.max(
+                16000,
+                Number(paidDemand.usage_per_item?.input_tokens || 0)
+              ),
+              output_tokens: Math.max(
+                4000,
+                Number(paidDemand.usage_per_item?.output_tokens || 0)
+              ),
+            },
+            providerId,
+            operationLabel: this.nodeChat.type === 'camera_movement'
+              ? '使用 API 微调运镜'
+              : '使用 API 微调分镜',
+            confirm: this.$confirm,
+            alert: this.$alert,
+          });
+          if (!paidConfirmation) {
+            assistantMessage.content = '已取消，本次对话内容未发送到外部 Provider。';
+            assistantMessage.streaming = false;
+            return;
+          }
+          initResponse = await projectsAPI.initNodeChat(this.project.id, {
+            ...chatPayload,
+            confirm_paid: true,
+            confirmed_max_cost_cny: paidConfirmation.maxCostCny,
+          });
+        }
 
         const accessToken = store.getters['auth/accessToken'];
         const streamUrl = projectsAPI.getNodeChatStreamUrl(this.project.id, initResponse.stream_token, accessToken);
@@ -1973,7 +2066,7 @@ export default {
         return;
       }
 
-      this.$set(this.runtimeMediaDimensions, storyboardId, { width, height });
+      this.runtimeMediaDimensions[storyboardId] = { width, height };
     },
 
     getStoryboardMediaDimensions(storyboard) {
@@ -2283,6 +2376,13 @@ export default {
       this.$refs.flowCanvas?.focusNode(nodeKey, { topOffset });
     },
 
+    openApiRegenerationControl() {
+      this.$router.push({
+        name: 'LocalAIBudget',
+        query: { project_id: this.project.id },
+      });
+    },
+
     handleExecuteStage({ stageType, inputData }) {
       this.$emit('execute-stage', { stageType, inputData });
     },
@@ -2302,7 +2402,7 @@ export default {
       }
 
       Object.keys(patch).forEach((key) => {
-        this.$set(storyboard, key, patch[key]);
+        storyboard[key] = patch[key];
       });
     },
 
@@ -2317,10 +2417,10 @@ export default {
 
       const cameraData = storyboard.camera_movement.data;
       if (Object.prototype.hasOwnProperty.call(patch, 'movement_type')) {
-        this.$set(cameraData, 'movement_type', patch.movement_type);
+        cameraData.movement_type = patch.movement_type;
       }
       if (Object.prototype.hasOwnProperty.call(patch, 'movement_params')) {
-        this.$set(cameraData, 'movement_params', patch.movement_params);
+        cameraData.movement_params = patch.movement_params;
       }
     },
 
@@ -2328,9 +2428,9 @@ export default {
       if (!type || !key) {
         return;
       }
-      this.$set(this.nodeHighlights[type], key, true);
+      this.nodeHighlights[type][key] = true;
       window.setTimeout(() => {
-        this.$delete(this.nodeHighlights[type], key);
+        delete this.nodeHighlights[type][key];
       }, 1400);
     },
 
@@ -2346,7 +2446,7 @@ export default {
         }
 
         // 设置执行状态
-        this.$set(this.executingNodes.images, storyboardId, true);
+        this.executingNodes.images[storyboardId] = true;
 
         // 准备输入数据
         const inputData = {
@@ -2373,7 +2473,7 @@ export default {
         console.error('[ProjectCanvas] 生成图片失败:', error);
         this.$message?.error(error.message || '生成图片失败');
         // 清除执行状态
-        this.$set(this.executingNodes.images, storyboardId, false);
+        this.executingNodes.images[storyboardId] = false;
       }
     },
 
@@ -2384,7 +2484,7 @@ export default {
           this.$message?.error(`未找到分镜 ${storyboardId}`);
           return;
         }
-        this.$set(this.executingNodes.multiGridImages, storyboardId, true);
+        this.executingNodes.multiGridImages[storyboardId] = true;
         const inputData = {
           storyboard_ids: [storyboardId],
           scenes: [{
@@ -2405,7 +2505,7 @@ export default {
       } catch (error) {
         console.error('[ProjectCanvas] 生成多宫格图片失败:', error);
         this.$message?.error(error.message || '生成多宫格图片失败');
-        this.$set(this.executingNodes.multiGridImages, storyboardId, false);
+        this.executingNodes.multiGridImages[storyboardId] = false;
       }
     },
 
@@ -2420,7 +2520,7 @@ export default {
           this.$message?.warning('请先生成多宫格切片');
           return;
         }
-        this.$set(this.executingNodes.imageEdits, storyboardId, true);
+        this.executingNodes.imageEdits[storyboardId] = true;
         const inputData = {
           storyboard_ids: [storyboardId],
         };
@@ -2435,7 +2535,7 @@ export default {
       } catch (error) {
         console.error('[ProjectCanvas] 执行图片编辑失败:', error);
         this.$message?.error(error.message || '执行图片编辑失败');
-        this.$set(this.executingNodes.imageEdits, storyboardId, false);
+        this.executingNodes.imageEdits[storyboardId] = false;
       }
     },
 
@@ -2451,13 +2551,13 @@ export default {
         }
 
         // 设置执行状态
-        this.$set(this.executingNodes.cameras, storyboardId, true);
+        this.executingNodes.cameras[storyboardId] = true;
 
         // 准备输入数据
         const imageUrl = this.getCameraInputUrl(storyboard);
         if (!imageUrl) {
           this.$message?.warning('请先生成图片');
-          this.$set(this.executingNodes.cameras, storyboardId, false);
+          this.executingNodes.cameras[storyboardId] = false;
           return;
         }
 
@@ -2480,7 +2580,7 @@ export default {
         console.error('[ProjectCanvas] 生成运镜失败:', error);
         this.$message?.error(error.message || '生成运镜失败');
         // 清除执行状态
-        this.$set(this.executingNodes.cameras, storyboardId, false);
+        this.executingNodes.cameras[storyboardId] = false;
       }
     },
 
@@ -2508,13 +2608,13 @@ export default {
         }
 
         // 设置执行状态
-        this.$set(this.executingNodes.videos, storyboardId, true);
+        this.executingNodes.videos[storyboardId] = true;
 
         // 准备输入数据
         const imageUrl = this.getCameraInputUrl(storyboard);
         if (!imageUrl) {
           this.$message?.warning('请先生成图片');
-          this.$set(this.executingNodes.videos, storyboardId, false);
+          this.executingNodes.videos[storyboardId] = false;
           return;
         }
 
@@ -2544,7 +2644,7 @@ export default {
         console.error('[ProjectCanvas] 生成视频失败:', error);
         this.$message?.error(error.message || '生成视频失败');
         // 清除执行状态
-        this.$set(this.executingNodes.videos, storyboardId, false);
+        this.executingNodes.videos[storyboardId] = false;
       }
     },
 
@@ -2570,6 +2670,12 @@ export default {
       console.log('[ProjectCanvas] 运行完整流程');
 
       try {
+        if (this.beforeRunPipeline) {
+          const allowed = await this.beforeRunPipeline();
+          if (!allowed) {
+            return false;
+          }
+        }
         this.isRunningPipeline = true;
 
         // 调用API启动工作流
@@ -2593,11 +2699,13 @@ export default {
 
         // 显示成功消息
         this.$message?.success('工作流已启动，正在执行...');
+        return true;
 
       } catch (error) {
         console.error('[ProjectCanvas] 启动工作流失败:', error);
         this.$message?.error(error.response?.data?.error || error.message || '启动工作流失败');
         this.isRunningPipeline = false;
+        return false;
       }
     },
 
@@ -2694,15 +2802,15 @@ export default {
       const storyboardId = storyboard.id;
 
       if (itemType === 'image') {
-        this.$set(this.executingNodes.images, storyboardId, isLoading);
+        this.executingNodes.images[storyboardId] = isLoading;
       } else if (itemType === 'multi_grid_image') {
-        this.$set(this.executingNodes.multiGridImages, storyboardId, isLoading);
+        this.executingNodes.multiGridImages[storyboardId] = isLoading;
       } else if (itemType === 'image_edit') {
-        this.$set(this.executingNodes.imageEdits, storyboardId, isLoading);
+        this.executingNodes.imageEdits[storyboardId] = isLoading;
       } else if (itemType === 'camera') {
-        this.$set(this.executingNodes.cameras, storyboardId, isLoading);
+        this.executingNodes.cameras[storyboardId] = isLoading;
       } else if (itemType === 'video') {
-        this.$set(this.executingNodes.videos, storyboardId, isLoading);
+        this.executingNodes.videos[storyboardId] = isLoading;
       }
     },
 

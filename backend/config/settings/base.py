@@ -6,6 +6,7 @@ Django基础配置
 import os
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 
 # 项目根目录
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -36,6 +37,7 @@ INSTALLED_APPS = [
     'apps.projects',
     'apps.prompts',
     'apps.models',
+    'apps.inference',
     'apps.content',
     'apps.users',
     'apps.mock_api',
@@ -77,12 +79,65 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 # 数据库配置
+
+
+def resolve_sqlite_path(value=None):
+    """把 SQLite 相对路径稳定地解析到项目目录，并确保父目录存在。
+
+    开发命令既可能从仓库根目录运行，也可能从 ``backend`` 运行，不能让
+    相同环境变量因当前工作目录不同而落到两套数据库。
+    """
+
+    raw_path = value or str(BASE_DIR / 'data' / 'ai_story.db')
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        parts = [part.lower() for part in path.parts]
+        if parts and parts[0] == 'backend':
+            path = BASE_DIR.parent / path
+        else:
+            path = BASE_DIR / path
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': os.getenv('SQLITE_DB_PATH', str(BASE_DIR / 'data' / 'ai_story.db')),
+        'NAME': resolve_sqlite_path(os.getenv('SQLITE_DB_PATH')),
     }
 }
+
+
+def database_config_from_url(database_url):
+    """将 DATABASE_URL 转换为 Django 3.2 数据库配置。
+
+    这里只支持本项目明确使用的 SQLite 与 PostgreSQL，避免引入一个仅为
+    解析连接串而存在的运行时依赖。生产环境会在 production.py 中进一步
+    限制为 PostgreSQL，开发环境仍固定使用 SQLite。
+    """
+    parsed = urlparse(database_url)
+    if parsed.scheme in {'postgres', 'postgresql'}:
+        options = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
+        return {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': unquote(parsed.path.lstrip('/')),
+            'USER': unquote(parsed.username or ''),
+            'PASSWORD': unquote(parsed.password or ''),
+            'HOST': parsed.hostname or 'localhost',
+            'PORT': parsed.port or 5432,
+            'CONN_MAX_AGE': int(os.getenv('DATABASE_CONN_MAX_AGE', '60')),
+            'OPTIONS': options,
+        }
+    if parsed.scheme == 'sqlite':
+        sqlite_path = unquote(parsed.path or '')
+        if parsed.netloc:
+            sqlite_path = f'//{parsed.netloc}{sqlite_path}'
+        return {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': resolve_sqlite_path(sqlite_path or None),
+        }
+    raise ValueError('DATABASE_URL 仅支持 sqlite、postgres 或 postgresql 协议')
 
 # 密码验证
 AUTH_PASSWORD_VALIDATORS = [
@@ -122,11 +177,12 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'DEFAULT_PAGINATION_CLASS': 'core.pagination.StandardPageNumberPagination',
     'PAGE_SIZE': 20,
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
     ],
+    'EXCEPTION_HANDLER': 'core.api_exception_handler.safe_exception_handler',
 }
 
 # Redis配置 - 使用不同的数据库避免冲突
@@ -134,17 +190,58 @@ REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
 
 # Celery配置
-BROKER_URL = f'redis://{REDIS_HOST}:{REDIS_PORT}/0'  # 数据库0: Celery任务队列
-CELERY_BROKER_URL = f'redis://{REDIS_HOST}:{REDIS_PORT}/0'  # 数据库0: Celery任务队列
-CELERY_RESULT_BACKEND = f'redis://{REDIS_HOST}:{REDIS_PORT}/1'  # 数据库1: Celery结果存储
+BROKER_URL = os.getenv('CELERY_BROKER_URL', f'redis://{REDIS_HOST}:{REDIS_PORT}/0')
+CELERY_BROKER_URL = BROKER_URL
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', f'redis://{REDIS_HOST}:{REDIS_PORT}/1')
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_BROKER_VISIBILITY_TIMEOUT = int(os.getenv('CELERY_BROKER_VISIBILITY_TIMEOUT', 3600 * 3))  # 3小时，需大于最长任务执行时间
+CELERY_TASK_ACKS_LATE = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_TASK_ROUTES = {
+    'apps.inference.tasks.dispatch_work_item': {'queue': 'orchestration'},
+    'apps.inference.tasks.enqueue_work_item': {'queue': 'orchestration'},
+    'apps.inference.tasks.cancel_work_item': {'queue': 'orchestration'},
+    'apps.inference.tasks.reconcile_work_items': {'queue': 'maintenance'},
+    'apps.inference.tasks.cleanup_expired_artifacts': {'queue': 'maintenance'},
+    'apps.projects.tasks.execute_llm_stage': {'queue': 'llm'},
+    'apps.projects.tasks.execute_text2image_stage': {'queue': 'image'},
+    'apps.projects.tasks.execute_multi_grid_image_stage': {'queue': 'image'},
+    'apps.projects.tasks.execute_image_edit_stage': {'queue': 'image'},
+    'apps.projects.tasks.execute_image2video_stage': {'queue': 'video'},
+}
+CELERY_BEAT_SCHEDULE = {
+    'reconcile-generation-work-items': {
+        'task': 'apps.inference.tasks.reconcile_work_items',
+        'schedule': 60.0,
+    },
+    'cleanup-expired-ai-artifacts': {
+        'task': 'apps.inference.tasks.cleanup_expired_artifacts',
+        'schedule': 3600.0,
+    },
+}
 
 # Redis Pub/Sub配置 (用于实时流式推送)
 REDIS_PUBSUB_URL = os.getenv('REDIS_PUBSUB_URL', f'redis://{REDIS_HOST}:{REDIS_PORT}/2')  # 数据库2: Pub/Sub专用
+
+# 混合推理控制面默认关闭，先通过影子模式验证新旧路由决策一致性。
+AI_ROUTER_V2_ENABLED = os.getenv('AI_ROUTER_V2_ENABLED', 'false').lower() == 'true'
+AI_ROUTER_V2_SHADOW_MODE = os.getenv('AI_ROUTER_V2_SHADOW_MODE', 'true').lower() == 'true'
+AI_ENFORCE_PAID_PROVIDER_GUARD = (
+    os.getenv('AI_ENFORCE_PAID_PROVIDER_GUARD', 'true').lower() == 'true'
+)
+AI_WORK_ITEM_EVENTS_ENABLED = os.getenv('AI_WORK_ITEM_EVENTS_ENABLED', 'true').lower() == 'true'
+AI_DISTRIBUTED_RESOURCE_LEASES_ENABLED = (
+    os.getenv('AI_DISTRIBUTED_RESOURCE_LEASES_ENABLED', 'true').lower() == 'true'
+)
+AI_RUNTIME_ROOT = os.getenv('AI_RUNTIME_ROOT', r'E:\AI\ai-story-runtime')
+AI_RUNTIME_AGENT_URL = os.getenv('AI_RUNTIME_AGENT_URL', 'http://127.0.0.1:9100').rstrip('/')
+AI_RUNTIME_AGENT_TOKEN = os.getenv('AI_RUNTIME_AGENT_TOKEN', '')
+AI_INTERMEDIATE_RETENTION_DAYS = int(os.getenv('AI_INTERMEDIATE_RETENTION_DAYS', '30'))
+AI_ARTIFACT_CLEANUP_ENABLED = os.getenv('AI_ARTIFACT_CLEANUP_ENABLED', 'false').lower() == 'true'
 
 # CORS配置
 CORS_ALLOW_ALL_ORIGINS = False

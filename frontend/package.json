@@ -7,42 +7,51 @@
     "dev": "webpack serve --mode development --config config/webpack.dev.js",
     "build": "webpack --mode production --config config/webpack.prod.js",
     "lint": "eslint --ext .js,.vue src",
-    "lint:fix": "eslint --ext .js,.vue src --fix"
+    "lint:fix": "eslint --ext .js,.vue src --fix",
+    "audit:vue2": "node scripts/vue2-compat-audit.cjs",
+    "smoke:auth": "node scripts/authenticated-smoke.cjs",
+    "smoke:streaming": "node scripts/streaming-authenticated-smoke.cjs"
   },
   "dependencies": {
-    "vue": "^2.7.14",
-    "vue-router": "^3.6.5",
-    "vuex": "^3.6.2",
     "axios": "^1.6.2",
+    "dayjs": "^1.11.10",
     "lodash": "^4.17.21",
-    "dayjs": "^1.11.10"
+    "vue": "^3.5.39",
+    "vue-router": "^4.6.4",
+    "vuex": "^4.1.0"
   },
   "devDependencies": {
     "@babel/core": "^7.23.5",
     "@babel/preset-env": "^7.23.5",
+    "@vue/compiler-sfc": "^3.5.39",
     "autoprefixer": "^10.4.16",
     "babel-loader": "^9.1.3",
     "css-loader": "^6.8.1",
+    "daisyui": "4.12.23",
     "eslint": "^8.55.0",
     "eslint-plugin-vue": "^9.19.2",
     "file-loader": "^6.2.0",
     "html-webpack-plugin": "^5.5.4",
     "mini-css-extract-plugin": "^2.7.6",
+    "playwright": "^1.61.1",
     "postcss": "^8.4.32",
     "postcss-loader": "^7.3.3",
     "style-loader": "^3.3.3",
     "tailwindcss": "3.4.17",
-    "daisyui": "4.12.23",
     "url-loader": "^4.1.1",
-    "vue-loader": "^15.11.1",
-    "vue-template-compiler": "^2.7.14",
+    "vue-loader": "^17.4.2",
     "webpack": "^5.89.0",
     "webpack-cli": "^5.1.4",
-    "webpack-dev-server": "^4.15.1",
+    "webpack-dev-server": "^5.2.5",
     "webpack-merge": "^5.10.0"
   },
   "engines": {
-    "node": ">=16.0.0",
+    "node": ">=18.12.0",
     "npm": ">=8.0.0"
+  },
+  "overrides": {
+    "sockjs": {
+      "uuid": "^11.1.1"
+    }
   }
 }

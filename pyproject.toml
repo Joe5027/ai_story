@@ -22,6 +22,7 @@ dependencies = [
     "gunicorn>=25.0.3",
     "jinja2>=3.1.6",
     "pillow>=12.0.0",
+    "psycopg2-binary==2.9.10",
     "pyjianyingdraft>=0.2.5",
     "python-dotenv>=1.2.1",
     "requests>=2.32.5",

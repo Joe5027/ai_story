@@ -229,7 +229,7 @@ export default {
       return this.isConnected ? 'alert-success' : 'alert-info';
     },
   },
-  beforeDestroy() {
+  beforeUnmount() {
     // 组件销毁时断开连接
     this.disconnect();
   },

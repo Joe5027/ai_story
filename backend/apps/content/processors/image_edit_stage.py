@@ -11,6 +11,7 @@ from django.utils import timezone
 from jinja2 import Template, TemplateError
 
 from apps.content.models import EditedImage, MultiGridTile, Storyboard
+from apps.inference.services.hybrid import HybridInferenceService
 from apps.projects.models import Project, ProjectStage
 from apps.prompts.client_param_resolver import resolve_stage_client_params
 from core.ai_client.factory import create_ai_client
@@ -166,7 +167,6 @@ class ImageEditStageProcessor(Text2ImageStageProcessor):
                 yield {'type': 'error', 'error': '未配置可用的图片编辑模型'}
                 return
 
-            client = create_ai_client(provider)
             success_count = 0
             failed_count = 0
 
@@ -205,19 +205,55 @@ class ImageEditStageProcessor(Text2ImageStageProcessor):
                     'message': f'正在执行第 {index}/{total} 张图片编辑...',
                 }
 
-                response = ImageGenerationService.edit(
-                    provider=provider,
-                    client=client,
-                    request=ImageEditRequest(
-                        source_images=[tile.tile_image_url],
-                        prompt=prompt,
-                        mask_image=client_params.get('mask_url', ''),
-                        negative_prompt=client_params.get('negative_prompt', ''),
-                        strength=client_params.get('strength', strength),
-                        width=output_width,
-                        height=output_height,
-                    ),
+                request_parameters = {
+                    'prompt': prompt,
+                    'source_images': [tile.tile_image_url],
+                    'mask_image': client_params.get('mask_url', ''),
+                    'negative_prompt': client_params.get('negative_prompt', ''),
+                    'strength': client_params.get('strength', strength),
+                    'width': output_width,
+                    'height': output_height,
+                    'output_spec': {
+                        'width': output_width,
+                        'height': output_height,
+                        'sample_count': 1,
+                    },
+                }
+
+                def invoke(selected_provider, parameters, _repaired_structure):
+                    # 客户端创建必须位于 Hybrid 的最小授权范围内，不能让旧图片
+                    # 编辑循环绕过项目云授权、有效价目表和预算预留。
+                    client = create_ai_client(selected_provider)
+                    return ImageGenerationService.edit(
+                        provider=selected_provider,
+                        client=client,
+                        request=ImageEditRequest(
+                            source_images=parameters['source_images'],
+                            prompt=parameters['prompt'],
+                            mask_image=parameters.get('mask_image', ''),
+                            negative_prompt=parameters.get('negative_prompt', ''),
+                            strength=parameters.get('strength', 0.35),
+                            width=parameters.get('width', 1024),
+                            height=parameters.get('height', 1024),
+                        ),
+                    )
+
+                execution = HybridInferenceService.execute(
+                    project=project,
+                    capability='image_edit',
+                    stage_type=self.stage_type,
+                    explicit_provider=provider,
+                    manual_api=False,
+                    request_parameters=request_parameters,
+                    usage_estimate={
+                        'request_count': 1,
+                        'image_count': 1,
+                        'width': output_width,
+                        'height': output_height,
+                    },
+                    invoke=invoke,
                 )
+                response = execution.value
                 response_data = getattr(response, 'data', None) if not isinstance(response, dict) else response.get('data')
                 response_error = getattr(response, 'error', None) if not isinstance(response, dict) else response.get('error')
                 if not response_data:

@@ -7,6 +7,7 @@
 import logging
 from typing import Optional
 from .base import BaseAIClient
+from .outbound_guard import require_paid_provider_authorization
 from .registry import get_executor_class, validate_executor_for_provider
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,10 @@ def create_ai_client(provider) -> BaseAIClient:
     # 验证provider对象
     if not provider:
         raise ValueError("ModelProvider实例不能为空")
+
+    # 任何遗留 Processor 或新代码若绕过 Hybrid 路由直接创建付费客户端，都会
+    # 在这里 fail closed；本地与 Mock Provider 不受影响。
+    require_paid_provider_authorization(provider)
 
     # 获取执行器类路径
     executor_class_path = provider.executor_class
@@ -61,11 +66,22 @@ def create_ai_client(provider) -> BaseAIClient:
             **provider.extra_config  # 合并额外配置
         }
 
+        api_url = provider.api_url
+        api_key = provider.api_key
+        model_name = provider.model_name
+        if getattr(provider, 'deployment_mode', 'api') == 'local':
+            runtime_node = getattr(provider, 'runtime_node', None)
+            if runtime_node:
+                api_url = runtime_node.agent_url
+                api_key = runtime_node.access_token
+            model_name = getattr(provider, 'runtime_model_id', '') or model_name
+            config['runtime_adapter'] = getattr(provider, 'runtime_adapter', '')
+
         # 创建客户端实例
         client = executor_class(
-            api_url=provider.api_url,
-            api_key=provider.api_key,
-            model_name=provider.model_name,
+            api_url=api_url,
+            api_key=api_key,
+            model_name=model_name,
             **config
         )
 

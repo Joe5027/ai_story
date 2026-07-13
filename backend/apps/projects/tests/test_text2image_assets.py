@@ -35,6 +35,7 @@ class Text2ImageAssetPromptTestCase(APITestCase):
         self.provider = ModelProvider.objects.create(
             name='火山文生图',
             provider_type='text2image',
+            deployment_mode='mock',
             api_url='https://ark.cn-beijing.volces.com/api/v3/images/generations',
             api_key='test-key',
             model_name='doubao-seedream-5-0-250428',

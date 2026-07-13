@@ -23,6 +23,7 @@ class PromptDebugServiceText2ImageTestCase(TestCase):
         self.provider = ModelProvider.objects.create(
             name='调试文生图模型',
             provider_type='text2image',
+            deployment_mode='mock',
             api_url='https://ark.cn-beijing.volces.com/api/v3/images/generations',
             api_key='debug-key',
             model_name='doubao-seedream-5-0-250428',
@@ -92,3 +93,23 @@ class PromptDebugServiceText2ImageTestCase(TestCase):
         self.assertEqual(generate_kwargs['steps'], 28)
         self.assertEqual(generate_kwargs['negative_prompt'], '模糊')
         self.assertEqual(run.rendered_prompt, '请参考图1和图2，并再次强调图1')
+
+    @patch('apps.prompts.debug_services.create_ai_client')
+    def test_paid_debug_without_project_context_fails_before_client_creation(
+        self, mock_create_ai_client
+    ):
+        self.provider.deployment_mode = 'api'
+        self.provider.save(update_fields=['deployment_mode'])
+
+        with self.assertRaisesMessage(ValueError, 'PAID_PROJECT_CONTEXT_REQUIRED'):
+            PromptDebugService.run_session(
+                session=self.session,
+                user=self.user,
+                template_content='{{ visual_prompt }}',
+                variable_values={'visual_prompt': '付费调试不得外呼'},
+                input_payload={},
+                source_artifact_id=None,
+                provider_id=str(self.provider.id),
+            )
+
+        mock_create_ai_client.assert_not_called()

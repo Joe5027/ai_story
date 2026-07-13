@@ -56,8 +56,12 @@ export default {
     return apiClient.patch(`/projects/projects/${projectId}/asset_extraction_item/`, data);
   },
 
-  generateAssetExtractionImage(projectId, data = {}) {
-    return apiClient.post(`/projects/projects/${projectId}/asset_extraction_generate_image/`, data);
+  generateAssetExtractionImage(projectId, data = {}, requestOptions = {}) {
+    return apiClient.post(
+      `/projects/projects/${projectId}/asset_extraction_generate_image/`,
+      data,
+      requestOptions
+    );
   },
 
   confirmAssetExtractionImage(projectId, data = {}) {
@@ -88,12 +92,34 @@ export default {
     return apiClient.get(`/projects/projects/${projectId}/stages/`);
   },
 
-  executeStage(projectId, stageName, inputData = {}, useStreaming = false) {
-    return apiClient.post(`/projects/projects/${projectId}/execute_stage/`, {
-      stage_name: stageName,
-      input_data: inputData,
-      use_streaming: useStreaming,
-    });
+  executeStage(
+    projectId,
+    stageName,
+    inputData = {},
+    useStreaming = false,
+    {
+      confirmPaidGeneration = false,
+      confirmedMaxCostCny = null,
+      idempotencyKey = null,
+    } = {}
+  ) {
+    return apiClient.post(
+      `/projects/projects/${projectId}/execute_stage/`,
+      {
+        stage_name: stageName,
+        input_data: {
+          ...inputData,
+          ...(confirmPaidGeneration ? { confirm_paid_generation: true } : {}),
+          ...(confirmPaidGeneration ? { confirmed_max_cost_cny: confirmedMaxCostCny } : {}),
+        },
+        use_streaming: useStreaming,
+        ...(confirmPaidGeneration ? { confirm_paid_generation: true } : {}),
+        ...(confirmPaidGeneration ? { confirmed_max_cost_cny: confirmedMaxCostCny } : {}),
+      },
+      idempotencyKey
+        ? { headers: { 'Idempotency-Key': idempotencyKey } }
+        : undefined
+    );
   },
 
   retryStage(projectId, stageName) {
@@ -169,8 +195,12 @@ export default {
     return apiClient.patch(`/projects/projects/${projectId}/update_camera_movement/`, data);
   },
 
-  initNodeChat(projectId, data) {
-    return apiClient.post(`/projects/projects/${projectId}/node-chat-init/`, data);
+  initNodeChat(projectId, data, requestOptions = {}) {
+    return apiClient.post(
+      `/projects/projects/${projectId}/node-chat-init/`,
+      data,
+      requestOptions
+    );
   },
 
   getNodeChatStreamUrl(projectId, streamToken, accessToken) {

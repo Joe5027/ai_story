@@ -10,6 +10,7 @@ export const PROJECT_STATUS = {
 // 阶段类型常量
 export const STAGE_TYPES = {
   REWRITE: 'rewrite',
+  ASSET_EXTRACTION: 'asset_extraction',
   STORYBOARD: 'storyboard',
   IMAGE_GENERATION: 'image_generation',
   MULTI_GRID_IMAGE: 'multi_grid_image',

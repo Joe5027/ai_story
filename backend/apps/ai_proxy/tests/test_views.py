@@ -42,10 +42,10 @@ class AIProxyViewTests(APITestCase):
         response = self.client.get(reverse('ai-models'))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data['chat']), 1)
-        self.assertEqual(len(response.data['image']), 1)
-        self.assertEqual(len(response.data['video']), 1)
-        self.assertEqual(response.data['chat'][0]['model_name'], 'gpt-test')
+        # 安装迁移会保留可用 Mock Provider，列表断言只关注本测试创建的条目。
+        self.assertIn('gpt-test', [item['model_name'] for item in response.data['chat']])
+        self.assertIn('image-test', [item['model_name'] for item in response.data['image']])
+        self.assertIn('video-test', [item['model_name'] for item in response.data['video']])
 
     @patch('apps.ai_proxy.views.create_ai_client')
     def test_images_generations_uses_text2image_provider(self, mock_create_client):
@@ -56,6 +56,7 @@ class AIProxyViewTests(APITestCase):
             api_key='key',
             model_name='image-test',
             executor_class='core.ai_client.executors.openai_images_generation_executor.OpenAIImagesGenerationExecutor',
+            deployment_mode='mock',
         )
         mock_create_client.return_value = object()
 
@@ -92,6 +93,7 @@ class AIProxyViewTests(APITestCase):
             api_key='key',
             model_name='edit-test',
             executor_class='core.ai_client.executors.openai_images_edit_executor.OpenAIImagesEditExecutor',
+            deployment_mode='mock',
         )
         mock_create_client.return_value = object()
 
@@ -130,6 +132,7 @@ class AIProxyViewTests(APITestCase):
             api_key='key',
             model_name='video-test',
             executor_class='core.ai_client.image2video_client.VideoGeneratorClient',
+            deployment_mode='mock',
         )
 
         fake_client = Mock()
@@ -163,3 +166,25 @@ class AIProxyViewTests(APITestCase):
             fake_client._generate_video.call_args.kwargs['image_uris'],
             ['/api/v1/content/storage/image/a.png', '/api/v1/content/storage/image/b.png'],
         )
+
+    @patch('apps.ai_proxy.views.ImageGenerationService.generate')
+    def test_api_image_without_project_is_blocked_before_external_execution(self, mock_generate):
+        ModelProvider.objects.create(
+            name='Paid Image Provider',
+            provider_type='text2image',
+            api_url='https://example.com/v1/images/generations',
+            api_key='secret',
+            model_name='paid-image-test',
+            executor_class='core.ai_client.executors.openai_images_generation_executor.OpenAIImagesGenerationExecutor',
+            deployment_mode='api',
+        )
+
+        response = self.client.post(
+            reverse('ai-images-generations'),
+            {'model': 'paid-image-test', 'prompt': '不会出站'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['error']['code'], 'PROJECT_REQUIRED')
+        mock_generate.assert_not_called()
