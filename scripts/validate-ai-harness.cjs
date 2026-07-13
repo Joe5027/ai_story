@@ -263,6 +263,16 @@ function run() {
     'validate-streaming-local.cjs --require-redis',
   ]);
 
+  for (const smokeScript of [
+    'frontend/scripts/authenticated-smoke.cjs',
+    'frontend/scripts/streaming-authenticated-smoke.cjs',
+  ]) {
+    checkIncludes(`${smokeScript} cleans Linux process groups`, read(smokeScript), [
+      'detached: !isWindows',
+      "process.kill(-child.pid, 'SIGTERM')",
+    ]);
+  }
+
   check(
     'frontend runtime source-of-truth files remain Vue 3/Vuex 4',
     read('frontend/src/router/index.js').includes('createRouter')

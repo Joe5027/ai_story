@@ -126,6 +126,7 @@ function startProcess(command, args, options) {
       ...options.env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: !isWindows,
     windowsHide: true,
   });
 
@@ -164,9 +165,13 @@ function stopProcess(child) {
   }
 
   try {
-    child.kill('SIGTERM');
+    process.kill(-child.pid, 'SIGTERM');
   } catch (_) {
-    // Process may already be gone.
+    try {
+      child.kill('SIGTERM');
+    } catch (_) {
+      // Process may already be gone.
+    }
   }
 }
 
