@@ -117,6 +117,7 @@
 - Added `ProjectSSEASGIApplication`, its async contract tests, and the project SSE routing wrapper in `backend/config/asgi.py`.
 - Ran `node scripts/validate-streaming-local.cjs --require-redis` against a temporary local Redis on 2026-07-13; result: passed in 58.8 seconds. Eight SSE/Celery/ASGI tests passed, Redis Pub/Sub passed, two SSE responses returned HTTP 200, non-terminal `done` kept both all-stage connections alive, and `pipeline_done`/`pipeline_error` reached the Vue UI and cleared recovery markers.
 - Reran `node scripts/validate-local.cjs` after adding the ASGI adapter to the normal gate; result: passed in 82 seconds with 25 AI harness checks, 8 SSE/ASGI/Celery tests, npm audit at 0 vulnerabilities, lint, Vue inventory, production build, and the standard authenticated browser smoke.
+- The first pull-request workflow runs failed during job setup because `astral-sh/setup-uv@v8` was not a resolvable tag. Both workflows now pin the official v8.1.0 commit `08807647e7069bb48b6ef5acd8ec9567f424441b`, and the AI harness enforces that pin.
 
 ## Next Action
 

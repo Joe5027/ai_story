@@ -244,7 +244,10 @@ function run() {
   const localValidation = read('scripts/validate-local.cjs');
   const ciValidation = read('.github/workflows/validation.yml');
   checkIncludes('local pre-PR gate runs the AI harness contract', localValidation, ['validate-ai-harness.cjs']);
-  checkIncludes('CI gate runs the AI harness contract', ciValidation, ['validate-ai-harness.cjs']);
+  checkIncludes('CI gate runs the AI harness contract with pinned uv setup', ciValidation, [
+    'validate-ai-harness.cjs',
+    'astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b',
+  ]);
 
   const streamingValidation = read('scripts/validate-streaming-local.cjs');
   const streamingWorkflow = read('.github/workflows/streaming-redis-validation.yml');
@@ -254,6 +257,7 @@ function run() {
   ]);
   checkIncludes('streaming CI installs Playwright before the browser smoke', streamingWorkflow, [
     'pull_request:',
+    'astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b',
     'npm ci',
     'playwright install --with-deps chromium',
     'validate-streaming-local.cjs --require-redis',
