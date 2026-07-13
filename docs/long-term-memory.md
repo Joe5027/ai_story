@@ -119,7 +119,8 @@
 - Reran `node scripts/validate-local.cjs` after adding the ASGI adapter to the normal gate; result: passed in 82 seconds with 25 AI harness checks, 8 SSE/ASGI/Celery tests, npm audit at 0 vulnerabilities, lint, Vue inventory, production build, and the standard authenticated browser smoke.
 - The first pull-request workflow runs failed during job setup because `astral-sh/setup-uv@v8` was not a resolvable tag. Both workflows now pin the official v8.1.0 commit `08807647e7069bb48b6ef5acd8ec9567f424441b`, and the AI harness enforces that pin.
 - The next pull-request runs reached their final browser-smoke steps but did not exit because Linux cleanup terminated only the `npm`/`uv` parent process. Both smoke scripts now start detached process groups on non-Windows systems and terminate the full group with a negative PID; the AI harness enforces this cleanup contract.
+- Pull request #1 remote run number 3 passed both `Validation` and `Streaming Redis Validation` on GitHub's Ubuntu 24.04 runner after the setup-uv pin and Linux process-group cleanup fixes.
 
 ## Next Action
 
-Confirm the path-scoped `Streaming Redis Validation` pull-request run passes on Ubuntu, then consider a deterministic Celery worker + mock-provider pipeline smoke if worker orchestration becomes the next reliability bottleneck.
+Add a deterministic Celery worker + mock-provider pipeline smoke if worker orchestration becomes the next reliability bottleneck; the local and GitHub Redis/Daphne/EventSource/Vue transport chain is now proven.

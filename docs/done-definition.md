@@ -57,6 +57,7 @@ Known current validation notes:
 - The 2026-07-13 baseline passed 20 contract checks and repaired a missing `ASSET_EXTRACTION` member in `frontend/src/utils/constants.js`.
 - The Redis-backed streaming gate includes `test_asgi_sse`, a real Redis Pub/Sub round-trip, and authenticated Playwright success/error flows through Daphne and Vue. A non-terminal `done` must keep an all-stage connection alive; only `pipeline_done` or `pipeline_error` may clear it.
 - Local 2026-07-13 evidence: the required Redis streaming gate passed both terminal branches in 58.8 seconds, and the full non-Redis pre-PR gate passed in 82 seconds after `test_asgi_sse` was added.
+- Remote 2026-07-13 evidence: pull request #1 run number 3 passed both `Validation` and `Streaming Redis Validation` on GitHub's Ubuntu 24.04 runner.
 
 ## Frontend Checks
 
