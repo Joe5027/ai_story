@@ -133,6 +133,14 @@ class GeneratedImage(models.Model):
         null=True,
         verbose_name='使用的模型'
     )
+    media_artifact = models.ForeignKey(
+        'inference.MediaArtifact',
+        on_delete=models.SET_NULL,
+        related_name='generated_images',
+        null=True,
+        blank=True,
+        verbose_name='统一媒体产物',
+    )
 
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
     retry_count = models.IntegerField('重试次数', default=0)
@@ -273,6 +281,14 @@ class GeneratedVideo(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         verbose_name='使用的模型'
+    )
+    media_artifact = models.ForeignKey(
+        'inference.MediaArtifact',
+        on_delete=models.SET_NULL,
+        related_name='generated_videos',
+        null=True,
+        blank=True,
+        verbose_name='统一媒体产物',
     )
 
     generation_params = models.JSONField('生成参数', default=dict)
@@ -448,6 +464,14 @@ class EditedImage(models.Model):
         null=True,
         blank=True,
         verbose_name='使用的模型'
+    )
+    media_artifact = models.ForeignKey(
+        'inference.MediaArtifact',
+        on_delete=models.SET_NULL,
+        related_name='edited_images',
+        null=True,
+        blank=True,
+        verbose_name='统一媒体产物',
     )
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='completed')
     retry_count = models.IntegerField('重试次数', default=0)

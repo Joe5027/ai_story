@@ -64,10 +64,17 @@
                 v-for="item in availableProviders"
                 :key="item.id"
                 :value="item.id"
+                :disabled="item.deployment_mode === 'api'"
               >
-                {{ item.name }}
+                {{ item.name }}{{ item.deployment_mode === 'api' ? '（API，当前不可调试）' : '' }}
               </option>
             </select>
+            <p
+              v-if="effectiveDebugProvider?.deployment_mode === 'api'"
+              class="paid-debug-note"
+            >
+              Prompt Debug 没有项目云授权与预算上下文，付费 API 已禁用；请选择本地或 Mock Provider。
+            </p>
           </div>
 
           <div class="field-group">
@@ -397,6 +404,14 @@ export default {
       }
       return '请输入用户提示词文本'
     },
+    effectiveDebugProvider() {
+      if (this.form.model_provider_id) {
+        return this.availableProviders.find(
+          (provider) => provider.id === this.form.model_provider_id
+        ) || this.session?.prompt_template_detail?.model_provider_detail || null
+      }
+      return this.session?.prompt_template_detail?.model_provider_detail || null
+    },
   },
   watch: {
     '$route.params.id': {
@@ -492,6 +507,14 @@ export default {
     },
     async handleRun() {
       try {
+        if (this.effectiveDebugProvider?.deployment_mode === 'api') {
+          await this.$alert(
+            'Prompt Debug 不属于具体项目，无法校验项目云端授权、价目表和预算，也无法给出可信的最大费用。本次付费生成已阻止，请选择本地或 Mock Provider。',
+            '付费调试已阻止',
+            { tone: 'warning' }
+          )
+          return
+        }
         const data = {
           template_content: this.form.template_content,
           variable_values: this.parseJsonText(this.variableValuesText, {}),
@@ -687,6 +710,17 @@ export default {
   border: 1px solid rgba(15, 23, 42, 0.12);
   background: #ffffff;
   color: #0f172a;
+}
+
+.paid-debug-note {
+  margin-top: 0.5rem;
+  color: #b45309;
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+:global(.dark) .paid-debug-note {
+  color: #fbbf24;
 }
 
 .secondary-action {

@@ -1,9 +1,29 @@
 services:
 
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_story}
+      POSTGRES_USER: ${POSTGRES_USER:-ai_story}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ai_story} -d ${POSTGRES_DB:-ai_story}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   # Redis缓存和消息队列
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 
   # Django后端
@@ -15,9 +35,17 @@ services:
       - ./storage:/app/storage
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-ai_story}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_story}
       - REDIS_HOST=redis
+      - AI_RUNTIME_AGENT_URL=http://host.docker.internal:9100
+      - AI_RUNTIME_AGENT_TOKEN=${AI_RUNTIME_AGENT_TOKEN:?请设置 AI_RUNTIME_AGENT_TOKEN}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   # Celery Worker
   celery:
@@ -30,9 +58,35 @@ services:
       - ./storage:/app/storage
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-ai_story}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_story}
+      - REDIS_HOST=redis
+      - AI_RUNTIME_AGENT_URL=http://host.docker.internal:9100
+      - AI_RUNTIME_AGENT_TOKEN=${AI_RUNTIME_AGENT_TOKEN:?请设置 AI_RUNTIME_AGENT_TOKEN}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery-beat:
+    image: xhongc/ai_story-backend
+    working_dir: /app/backend
+    command: celery -A config beat -l info
+    restart: unless-stopped
+    volumes:
+      - ./data/backend:/app/backend/data
+      - ./storage:/app/storage
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-ai_story}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ai_story}
       - REDIS_HOST=redis
     depends_on:
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   # Vue前端
   frontend:
@@ -42,3 +96,6 @@ services:
       - "3000:3000"
     depends_on:
       - backend
+
+volumes:
+  postgres_data:

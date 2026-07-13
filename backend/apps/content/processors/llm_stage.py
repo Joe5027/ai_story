@@ -12,6 +12,7 @@ from django.utils import timezone
 from jinja2 import Template, TemplateError
 
 from apps.models.models import ModelProvider
+from apps.inference.services.hybrid import HybridInferenceService
 from apps.projects.models import Project, ProjectStage
 from apps.prompts.models import PromptTemplate
 from apps.prompts.client_param_resolver import resolve_stage_client_params
@@ -151,13 +152,11 @@ class LLMStageProcessor(StageProcessor):
                 }
             }
 
-            # 获取AI客户端
-            ai_client = self._get_ai_client(project)
-            ai_client_config = ai_client.config
+            provider = self._get_current_provider(project)
             client_params = resolve_stage_client_params(
                 self.stage_type,
                 template=template,
-                provider=self._get_current_provider(project),
+                provider=provider,
             )
             # 构建提示词
             prompt = self._build_prompt(project, input_data)
@@ -171,63 +170,92 @@ class LLMStageProcessor(StageProcessor):
 
             # 根据阶段类型构建任务列表
             tasks = self._build_tasks(project, input_data)
-            max_tokens = client_params.get('max_tokens', ai_client_config.get("max_tokens", self._get_max_tokens()))
-            temperature = client_params.get('temperature', ai_client_config.get("temperature", self._get_temperature()))
-            top_p = client_params.get('top_p', ai_client_config.get('top_p', 1.0))
+            max_tokens = client_params.get('max_tokens', provider.max_tokens or self._get_max_tokens())
+            temperature = client_params.get('temperature', provider.temperature)
+            top_p = client_params.get('top_p', provider.top_p)
             for index, task in enumerate(tasks, 1):
-                # 流式生成
-                full_text = ""
-                for chunk in ai_client.generate_stream(
-                    prompt=f'## 用户输入\n{task.get("user_prompt", "")}',
-                    system_prompt=prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                ):
-                    if chunk['type'] == 'token':
-                        full_text = chunk['full_text']
-                        print(chunk['content'], end="")
+                user_prompt = f'## 用户输入\n{task.get("user_prompt", "")}'
+                request_parameters = {
+                    'prompt': user_prompt,
+                    'system_prompt': prompt,
+                    'max_tokens': max_tokens,
+                    'temperature': temperature,
+                    'top_p': top_p,
+                    'output_spec': {'format': 'text'},
+                }
+                captured_chunks = []
+
+                def invoke(selected_provider, parameters, _repaired_structure):
+                    from core.ai_client.base import AIResponse
+                    from core.ai_client.factory import create_ai_client
+
+                    # 流式客户端也必须在预算预留之后创建。Hybrid 是同步事务边界，
+                    # 因此先在边界内完整消费流，再由外层回放 token 事件；这会让
+                    # 旧付费流式入口牺牲实时性，但不会出现“先外呼、后验预算”。
+                    client = create_ai_client(selected_provider)
+                    full_text = ''
+                    metadata = {}
+                    for chunk in client.generate_stream(
+                        prompt=parameters['prompt'],
+                        system_prompt=parameters.get('system_prompt', ''),
+                        max_tokens=parameters.get('max_tokens', selected_provider.max_tokens),
+                        temperature=parameters.get('temperature', selected_provider.temperature),
+                        top_p=parameters.get('top_p', selected_provider.top_p),
+                    ):
+                        captured_chunks.append(chunk)
+                        chunk_type = chunk.get('type')
+                        if chunk_type == 'token':
+                            full_text = chunk.get('full_text', full_text + chunk.get('content', ''))
+                        elif chunk_type == 'done':
+                            full_text = chunk.get('full_text', full_text)
+                            metadata = chunk.get('metadata') or metadata
+                        elif chunk_type == 'error':
+                            raise RuntimeError(chunk.get('error') or 'LLM 流式生成失败')
+                    if self.stage_type == 'storyboard':
+                        try:
+                            parse_storyboard_json(full_text)
+                        except ValueError as exc:
+                            exc.code = 'OUTPUT_SCHEMA_INVALID'
+                            raise
+                    return AIResponse(success=True, text=full_text, metadata=metadata)
+
+                execution = HybridInferenceService.execute(
+                    project=project,
+                    capability='llm',
+                    stage_type=self.stage_type,
+                    explicit_provider=provider,
+                    manual_api=False,
+                    request_parameters=request_parameters,
+                    usage_estimate={
+                        'request_count': 1,
+                        'input_tokens': max(1, len(prompt) + len(user_prompt)),
+                        'output_tokens': max_tokens,
+                    },
+                    invoke=invoke,
+                )
+                full_text = execution.value.text
+
+                for chunk in captured_chunks:
+                    if chunk.get('type') == 'token':
                         yield {
                             'type': 'token',
-                            'content': chunk['content'],
-                            'full_text': full_text
+                            'content': chunk.get('content', ''),
+                            'full_text': chunk.get('full_text', full_text),
                         }
 
-                    elif chunk['type'] == 'done':
-                        # 保存结果到领域模型
-                        self._save_result(
-                            project, stage, full_text, prompt, {"index": task.get("scene_number", "")}
-                        )
-
-                        # 如果是运镜生成，发送单个运镜完成消息
-                        if self.stage_type == 'camera_movement':
-                            yield {
-                                'type': 'camera_generated',
-                                'scene_number': task.get("scene_number", index),
-                                'sequence_number': task.get("scene_number", index),
-                            }
-
-                        # 更新阶段状态
-                        ProjectStage.objects.filter(id=stage.id).update(
-                            completed_at=timezone.now(),
-                            status='completed'
-                        )
-
-                    elif chunk['type'] == 'error':
-                        # 更新阶段状态为失败
-                        stage.status = 'failed'
-                        stage.error_message = chunk['error']
-                        stage.save()
-
-                        yield {
-                            'type': 'error',
-                            'error': chunk['error'],
-                            'stage': {
-                                'id': str(stage.id),
-                                'status': 'failed',
-                                'error_message': chunk['error']
-                            }
-                        }
+                self._save_result(
+                    project, stage, full_text, prompt, {"index": task.get("scene_number", "")}
+                )
+                if self.stage_type == 'camera_movement':
+                    yield {
+                        'type': 'camera_generated',
+                        'scene_number': task.get("scene_number", index),
+                        'sequence_number': task.get("scene_number", index),
+                    }
+                ProjectStage.objects.filter(id=stage.id).update(
+                    completed_at=timezone.now(),
+                    status='completed'
+                )
 
             yield {
                 'type': 'done',

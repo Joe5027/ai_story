@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "case_set_id": "zh-long-story-structure-v1",
+  "category": "text",
+  "status": "not_run",
+  "contains_secrets": false,
+  "language": "zh-CN",
+  "profile": "balanced",
+  "candidate_models": [
+    "pinned-local-qwen-openai-compatible",
+    "configured-api-baseline"
+  ],
+  "shared_input": {
+    "title": "潮汐灯塔",
+    "story": "海雾连续笼罩临汐镇的第七天，修表学徒林溪收到一只没有寄件人的旧怀表。表盖内刻着一句话：在第三次潮声响起前，把灯塔的光还给海面。她认出笔迹属于失踪三年的哥哥林舟，却发现怀表的秒针始终逆行。镇上的老船匠周伯告诉她，北岬灯塔自从一次雷暴后便不再旋转，渔船只能靠近岸的浮标辨路，而最近连浮标也开始在午夜漂移。\n\n林溪带着工具箱登上北岬。灯塔看守人顾遥拒绝开门，声称主透镜完好，只是镇议会为了省电停止了夜间运行。怀表在门外突然加速，远处海面传来第一声低沉潮鸣。林溪从排水沟钻入地下机房，发现发电机并未损坏，真正被拆走的是连接旋转台的黄铜擒纵轮。地面留着新鲜盐水和黑色纤维，像有人刚拖走沉重的潜水装备。\n\n她沿脚印来到废弃的气象站，看到顾遥正在修补一套旧式潜水服。顾遥承认三年前雷暴之夜，林舟曾发现灯塔下方的暗礁会在特定潮位形成回流；若灯光继续按照旧航线引导，货船会被带入危险水域。林舟拆下擒纵轮阻止灯塔旋转，随后潜入海底调整旧航标，却再也没有回来。顾遥一直隐瞒真相，因为镇议会计划恢复旧航线以吸引大型货运。\n\n第二声潮鸣响起，海雾中出现一艘失去导航的客船。林溪判断不能简单恢复旧航线，也不能让灯塔继续熄灭。她用怀表的逆行齿轮临时替代擒纵轮，并让顾遥根据林舟留下的潮位笔记重新校准透镜角度。两人必须在十分钟内完成安装：林溪负责机械联动，顾遥在塔顶用手势校对光束。第一次启动时齿轮卡死，林溪割开手套清除锈屑，怀表外壳被挤压变形，却终于带动透镜转向新的安全水道。\n\n第三声潮鸣与灯光同时划破海雾。客船调整方向，擦过暗礁驶入港湾。灯塔下方的回流将一个密封金属筒推上岸，里面是林舟留下的航标图和一封未寄出的信。信中没有解释他的去向，只要求后来者不要把守护理解为维持旧规则，而要根据海的变化重新选择道路。天亮后，林溪把航标图公开给镇民，顾遥向调查人员说明隐瞒经过，镇议会被迫暂停货运计划。林溪将损坏的怀表放在维修台上，决定保留逆行秒针，因为它提醒她：有些回到过去的线索，是为了让人修正未来。"
+  },
+  "cases": [
+    {
+      "case_id": "zh-rewrite-001",
+      "stage_type": "rewrite",
+      "seed": 24071301,
+      "task": "在不改变人物关系、因果链和开放结尾的前提下，将故事改写为适合 2 至 3 分钟动画短片的旁白稿。",
+      "limits": {
+        "max_output_tokens": 2600,
+        "temperature": 0.3
+      },
+      "expected_contract": {
+        "format": "plain_text",
+        "must_mention": [
+          "林溪",
+          "顾遥",
+          "林舟",
+          "逆行怀表",
+          "三次潮鸣",
+          "新安全水道"
+        ],
+        "forbidden_facts": [
+          "林舟确定死亡",
+          "顾遥偷走航标图",
+          "客船触礁沉没"
+        ]
+      }
+    },
+    {
+      "case_id": "zh-assets-001",
+      "stage_type": "asset_extraction",
+      "seed": 24071302,
+      "task": "抽取角色、场景和关键道具，输出严格 JSON。不要添加原文不存在的品牌或真实地点。",
+      "limits": {
+        "max_output_tokens": 2200,
+        "temperature": 0.1
+      },
+      "expected_contract": {
+        "format": "json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "characters",
+            "locations",
+            "props"
+          ],
+          "properties": {
+            "characters": {
+              "type": "array",
+              "minItems": 4,
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "role",
+                  "visual_traits"
+                ]
+              }
+            },
+            "locations": {
+              "type": "array",
+              "minItems": 4
+            },
+            "props": {
+              "type": "array",
+              "minItems": 4
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "case_id": "zh-storyboard-001",
+      "stage_type": "storyboard",
+      "seed": 24071303,
+      "task": "生成 12 个连续分镜的严格 JSON；每个分镜必须包含画面、人物、动作、旁白、时长和可执行运镜。总时长保持在 120 至 180 秒。",
+      "limits": {
+        "max_output_tokens": 5200,
+        "temperature": 0.2
+      },
+      "expected_contract": {
+        "format": "json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "shots"
+          ],
+          "properties": {
+            "shots": {
+              "type": "array",
+              "minItems": 12,
+              "maxItems": 12,
+              "items": {
+                "type": "object",
+                "required": [
+                  "shot_number",
+                  "visual",
+                  "characters",
+                  "action",
+                  "narration",
+                  "duration_seconds",
+                  "camera"
+                ],
+                "properties": {
+                  "shot_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12
+                  },
+                  "duration_seconds": {
+                    "type": "number",
+                    "minimum": 4,
+                    "maximum": 20
+                  },
+                  "camera": {
+                    "type": "object",
+                    "required": [
+                      "shot_size",
+                      "movement",
+                      "speed"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "review_rubric": [
+    "因果链完整",
+    "角色与道具名称稳定",
+    "JSON 首次或一次本地修复后通过 schema",
+    "运镜指令可执行且不含互相冲突动作",
+    "未泄露系统提示、路径或凭据"
+  ],
+  "result": {
+    "status": "not_run",
+    "measurement_path": null
+  }
+}

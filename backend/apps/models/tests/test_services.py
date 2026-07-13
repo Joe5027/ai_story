@@ -12,9 +12,11 @@ class ModelProviderServiceLLMTestCase(TestCase):
         provider = ModelProvider(
             name='OpenAI Test',
             provider_type='llm',
+            deployment_mode='mock',
             api_url='http://localhost:8000/v1/chat/completions',
             api_key='secret',
             model_name='gpt-test',
+            executor_class='core.ai_client.openai_client.OpenAIClient',
             max_tokens=512,
             temperature=0.7,
             timeout=30,
@@ -31,11 +33,34 @@ class ModelProviderServiceLLMTestCase(TestCase):
         self.assertEqual(result['text'], 'API请求失败: 401 - invalid api key')
 
 
+class ModelProviderHealthCheckTestCase(TestCase):
+    @patch('apps.models.services.requests.post')
+    @patch('apps.models.services.requests.get')
+    def test_health_check_uses_get_and_never_generates(self, request_get, request_post):
+        provider = ModelProvider.objects.create(
+            name='Health Only API',
+            provider_type='llm',
+            deployment_mode='api',
+            api_url='https://api.example.com/v1/chat/completions',
+            api_key='test-only',
+            model_name='health-model',
+            executor_class='core.ai_client.openai_client.OpenAIClient',
+        )
+        request_get.return_value.status_code = 200
+
+        result = ModelProviderService.check_provider_health(str(provider.id))
+
+        self.assertTrue(result['success'])
+        request_get.assert_called_once()
+        request_post.assert_not_called()
+
+
 class ModelProviderServiceImage2VideoTestCase(TestCase):
     async def test_image2video_provider_uses_comfyui_executor(self):
         provider = ModelProvider(
             name='ComfyUI Video',
             provider_type='image2video',
+            deployment_mode='mock',
             api_url='http://localhost:8188',
             api_key='secret',
             model_name='workflow-model',
@@ -61,6 +86,7 @@ class ModelProviderServiceImage2VideoTestCase(TestCase):
         provider = ModelProvider(
             name='Video API',
             provider_type='image2video',
+            deployment_mode='mock',
             api_url='http://localhost:9000',
             api_key='secret',
             model_name='video-model',
@@ -87,6 +113,7 @@ class ModelProviderServiceImage2VideoTestCase(TestCase):
         provider = ModelProvider(
             name='Video API',
             provider_type='image2video',
+            deployment_mode='mock',
             api_url='http://localhost:9000',
             api_key='secret',
             model_name='video-model',
@@ -119,6 +146,7 @@ class ModelProviderServiceImage2VideoTestCase(TestCase):
         provider = ModelProvider(
             name='Video API',
             provider_type='image2video',
+            deployment_mode='mock',
             api_url='http://localhost:9000',
             api_key='secret',
             model_name='video-model',
@@ -151,6 +179,7 @@ class ModelProviderServiceImage2VideoTestCase(TestCase):
         provider = ModelProvider(
             name='Volcengine Video API',
             provider_type='image2video',
+            deployment_mode='mock',
             api_url='https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks',
             api_key='secret',
             model_name='doubao-seedance-1-5-pro-251215',
@@ -179,6 +208,7 @@ class ModelProviderServiceImageEditTestCase(TestCase):
         provider = ModelProvider(
             name='Mock Image Edit',
             provider_type='image_edit',
+            deployment_mode='mock',
             api_url='http://localhost:8010/api/mock/image-edit/',
             api_key='secret',
             model_name='mock-image-edit-v1',

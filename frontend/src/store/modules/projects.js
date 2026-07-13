@@ -217,8 +217,24 @@ const actions = {
     }
   },
 
-  async executeStage({ commit }, { projectId, stageName, inputData }) {
-    const result = await projectApi.executeStage(projectId, stageName, inputData);
+  async executeStage(
+    { commit },
+    {
+      projectId,
+      stageName,
+      inputData,
+      confirmPaidGeneration = false,
+      confirmedMaxCostCny = null,
+      idempotencyKey = null
+    }
+  ) {
+    const result = await projectApi.executeStage(
+      projectId,
+      stageName,
+      inputData,
+      false,
+      { confirmPaidGeneration, confirmedMaxCostCny, idempotencyKey }
+    );
     if (result.project) {
       commit('UPDATE_PROJECT', result.project);
     }

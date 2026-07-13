@@ -205,7 +205,9 @@ function installSignalHandlers() {
 
 function buildDjangoEnv() {
   return {
-    DJANGO_SETTINGS_MODULE: 'config.settings.production',
+    // 流式浏览器冒烟只验证 Redis、Daphne、EventSource 与 Vue 链路；
+    // 使用开发配置和一次性 SQLite，避免继承宿主机生产 DATABASE_URL。
+    DJANGO_SETTINGS_MODULE: 'config.settings.development',
     SQLITE_DB_PATH: sqlitePath,
     REDIS_HOST: redisHost,
     REDIS_PORT: String(redisPort),

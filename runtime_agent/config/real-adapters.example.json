@@ -1,0 +1,40 @@
+{
+  "ollama": {
+    "base_url": "http://127.0.0.1:11434",
+    "model_id_prefix": "ollama/",
+    "timeout_seconds": 120
+  },
+  "comfyui": {
+    "base_url": "http://127.0.0.1:8188",
+    "manifest_path": "./config/workflows/comfyui-v1.example.json",
+    "workflow_version": "comfyui-example-v1",
+    "timeout_seconds": 180
+  },
+  "lightx2v": {
+    "model_path": "D:/models/LightX2V",
+    "command_template": [
+      "python",
+      "-m",
+      "lightx2v.infer",
+      "--model",
+      "{model_path}",
+      "--input",
+      "{input_path}",
+      "--prompt",
+      "{prompt}",
+      "--negative-prompt",
+      "{negative_prompt}",
+      "--seed",
+      "{seed}",
+      "--output",
+      "{output_path}"
+    ],
+    "timeout_seconds": 900
+  },
+  "ffmpeg_motion": {
+    "executable": "ffmpeg",
+    "max_segment_seconds": 5,
+    "overlap_frames": 8,
+    "timeout_seconds": 300
+  }
+}

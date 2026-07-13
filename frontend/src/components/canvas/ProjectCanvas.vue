@@ -160,6 +160,33 @@
         </div>
 
         <div
+          v-if="storyboards.length"
+          class="ui-chip-block ui-action-chip"
+        >
+          <button
+            class="btn btn-ghost btn-sm gap-2"
+            title="主观质量不满意时，选择具体工作项并确认最大 API 费用"
+            @click.stop="openApiRegenerationControl"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-4 w-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9M20 20v-5h-.581m0 0a8.003 8.003 0 01-15.357-2"
+              />
+            </svg>
+            API 重生成
+          </button>
+        </div>
+
+        <div
           v-if="project.jianying_draft_path"
           class="draft-info ui-chip-block"
         >
@@ -456,6 +483,7 @@
           :data="assetExtractionStage ? assetExtractionStage.domain_data : null"
           :project-id="project.id"
           :available-assets="availableAssets"
+          :image-provider="primaryImageProvider"
           @execute="handleExecuteStage"
           @asset-bindings-updated="handleAssetExtractionBindingsUpdated"
           @node-dblclick="focusCanvasNode('assetExtraction')"
@@ -666,6 +694,11 @@ import projectsAPI from '@/api/projects';
 import store from '@/store';
 import { promptTemplateAPI, STAGE_TYPES } from '@/api/prompts';
 import { formatDate } from '@/utils/helpers';
+import {
+  confirmPaidGeneration,
+  getPaidConfirmationDemand,
+  isPaidConfirmationRequired,
+} from '@/services/paidGenerationGuard';
 
 export default {
   name: 'ProjectCanvas',
@@ -700,6 +733,10 @@ export default {
     episodes: {
       type: Array,
       default: () => []
+    },
+    beforeRunPipeline: {
+      type: Function,
+      default: null
     }
   },
   data() {
@@ -772,6 +809,9 @@ export default {
     };
   },
   computed: {
+    primaryImageProvider() {
+      return this.modelConfig?.image_providers_detail?.[0] || null;
+    },
     // 截断项目名称
     truncatedProjectName() {
       const maxLength = 10;
@@ -1708,12 +1748,65 @@ export default {
       const requestId = this.nodeChat.streamRequestId;
 
       try {
-        const initResponse = await projectsAPI.initNodeChat(this.project.id, {
+        const chatPayload = {
           node_type: this.nodeChat.type,
           node_id: this.nodeChat.nodeId,
           user_message: message,
           messages: historyMessages,
-        });
+        };
+        let initResponse;
+        try {
+          initResponse = await projectsAPI.initNodeChat(
+            this.project.id,
+            chatPayload,
+            { suppressGlobalError: true }
+          );
+        } catch (error) {
+          if (!isPaidConfirmationRequired(error)) {
+            throw error;
+          }
+          const paidDemand = getPaidConfirmationDemand(error);
+          const providerField = this.nodeChat.type === 'camera_movement'
+            ? 'camera_providers'
+            : 'storyboard_providers';
+          const providerId = paidDemand.provider_id
+            || this.modelConfig?.[providerField]?.[0]
+            || null;
+          const paidConfirmation = await confirmPaidGeneration({
+            projectId: this.project.id,
+            capability: paidDemand.capability || 'llm',
+            stageType: paidDemand.stage_type || `${this.nodeChat.type}_chat`,
+            taskCount: 1,
+            usagePerItem: {
+              request_count: 1,
+              ...(paidDemand.usage_per_item || {}),
+              input_tokens: Math.max(
+                16000,
+                Number(paidDemand.usage_per_item?.input_tokens || 0)
+              ),
+              output_tokens: Math.max(
+                4000,
+                Number(paidDemand.usage_per_item?.output_tokens || 0)
+              ),
+            },
+            providerId,
+            operationLabel: this.nodeChat.type === 'camera_movement'
+              ? '使用 API 微调运镜'
+              : '使用 API 微调分镜',
+            confirm: this.$confirm,
+            alert: this.$alert,
+          });
+          if (!paidConfirmation) {
+            assistantMessage.content = '已取消，本次对话内容未发送到外部 Provider。';
+            assistantMessage.streaming = false;
+            return;
+          }
+          initResponse = await projectsAPI.initNodeChat(this.project.id, {
+            ...chatPayload,
+            confirm_paid: true,
+            confirmed_max_cost_cny: paidConfirmation.maxCostCny,
+          });
+        }
 
         const accessToken = store.getters['auth/accessToken'];
         const streamUrl = projectsAPI.getNodeChatStreamUrl(this.project.id, initResponse.stream_token, accessToken);
@@ -2283,6 +2376,13 @@ export default {
       this.$refs.flowCanvas?.focusNode(nodeKey, { topOffset });
     },
 
+    openApiRegenerationControl() {
+      this.$router.push({
+        name: 'LocalAIBudget',
+        query: { project_id: this.project.id },
+      });
+    },
+
     handleExecuteStage({ stageType, inputData }) {
       this.$emit('execute-stage', { stageType, inputData });
     },
@@ -2570,6 +2670,12 @@ export default {
       console.log('[ProjectCanvas] 运行完整流程');
 
       try {
+        if (this.beforeRunPipeline) {
+          const allowed = await this.beforeRunPipeline();
+          if (!allowed) {
+            return false;
+          }
+        }
         this.isRunningPipeline = true;
 
         // 调用API启动工作流
@@ -2593,11 +2699,13 @@ export default {
 
         // 显示成功消息
         this.$message?.success('工作流已启动，正在执行...');
+        return true;
 
       } catch (error) {
         console.error('[ProjectCanvas] 启动工作流失败:', error);
         this.$message?.error(error.response?.data?.error || error.message || '启动工作流失败');
         this.isRunningPipeline = false;
+        return false;
       }
     },
 

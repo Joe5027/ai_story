@@ -26,6 +26,13 @@
 - `frontend/scripts/streaming-authenticated-smoke.cjs` verifies authenticated success and error streams through real Redis, Daphne, EventSource, the frontend SSE client, and `ProjectDetail.vue` UI.
 - `scripts/validate-ai-harness.cjs` is the dependency-free AI operating-surface gate. It validates required rules/skills/docs, cross-layer stage membership, execution-order coverage, Celery and optional-route truth, handoff/automation contracts, and local/CI wiring.
 - The 2026-07-13 workspace audit reported no high-signal structural drift, but the new source-aware harness check found `asset_extraction` missing from `frontend/src/utils/constants.js`; the constant was repaired.
+- `backend/apps/inference/` now owns RuntimeNode, generation profile/route/target, project AI settings, versioned price, zero-default budget/reservation, restart-safe work item, MediaArtifact, local-first routing, paid-call gates, and scheduler control-plane code.
+- `ModelProvider` now distinguishes `mock/local/api`; existing non-Mock Providers migrate conservatively to `api`, and no localhost URL heuristic is used. Runtime Agent local Providers may omit a paid API key.
+- `runtime_agent/` is an independently locked FastAPI service with Bearer auth, SQLite WAL journal, idempotency conflict handling, cancellation/restart recovery, GPU/CPU resource groups, artifact hashing, five deterministic Mock capabilities, and explicitly inactive real-adapter skeletons.
+- Safe seed migrations create `local-gpu-0` capacity `1`, `local-cpu-motion` capacity `2`, five capabilities × three quality profiles/routes, inactive local Providers, and project/global/tool budgets of `0`.
+- `AI_ROUTER_V2_ENABLED=false` and `AI_ROUTER_V2_SHADOW_MODE=true` are the migration defaults. A paid fallback requires project cloud authorization, a matching effective price, and project/daily/monthly budget reservation; subjective quality cannot trigger it.
+- `scripts/local-ai/` provides non-destructive Windows preflight/install/start/stop/health/backup/log workflows. Model packages require displayed license/size/path, exact package-ID confirmation, resumable `.partial` download, SHA-256 validation, and atomic switch.
+- `docs/local-ai/` is the manual set, and `benchmarks/local-ai/` is the secret-free input set for Chinese structured text, character-consistent image editing, and three motion cases. No target-machine benchmark result has been recorded yet.
 
 ## Decisions
 
@@ -41,6 +48,11 @@
 - Run the AI harness contract first in local and CI validation so control-surface drift fails before dependency installation and expensive application checks.
 - Keep the synchronous Django SSE views for WSGI behavior and focused unit tests, but keep the two ASGI SSE paths routed through `ProjectSSEASGIApplication` until Django is upgraded and native async streaming is revalidated.
 - Treat `VUE_APP_API_BASE_URL` as the complete API prefix (`/api/v1` by default); SSE URLs append `/projects/...` and must not add a second `/api/v1`.
+- Keep Django as the project/routing/privacy/budget/ledger authority and Runtime Agent as a replaceable node-local execution authority. Runtime Agent must not connect to the business database or receive external Provider credentials.
+- Keep development SQLite support, but require PostgreSQL evidence for row-lock concurrency and high-intensity batch claims.
+- Keep local and paid Providers concurrently configurable. Local providers are the default route; paid targets remain fail-closed and explicit user API regeneration still passes privacy, price, and budget checks.
+- Keep real model/workflow versions pinned and manually upgraded. A provider/profile is not marked available until its fixed digest/workflow has fresh target-machine benchmark evidence.
+- Keep intermediate/failed media eligible for the documented 30-day lifecycle, but leave destructive cleanup disabled until installation-time confirmation and a recovery rehearsal are complete.
 
 ## Assumptions
 
@@ -49,6 +61,9 @@
 - The local package environment now supports backend `uv run` checks and frontend lint/build/dev-server/browser smoke after Vue 3 migration.
 - Existing generated images and media at repository root are historical artifacts; new generated media should remain under `storage/` or configured media roots.
 - The harness parser assumes canonical stage declarations remain literal Python/JavaScript lists or objects. If those declarations become generated dynamically, update the parser in the same change.
+- The current repository implementation can prove routing/Agent contracts using Mock providers without downloading models; this is intentional and must not be upgraded into a quality or capacity claim.
+- Real Ollama, ComfyUI, LightX2V, FFmpeg/RIFE activation depends on user-approved downloads, license review, fixed digests/workflows, and the target Windows environment.
+- PostgreSQL/Redis restart, duplicate-billing, overnight throughput, and RTX 3080 Laptop memory limits remain integration/hardware acceptance work until fresh evidence is recorded.
 
 ## Validation
 
@@ -112,7 +127,7 @@
 - Added `ASSET_EXTRACTION: 'asset_extraction'` to `frontend/src/utils/constants.js`, reran the harness, and passed all 20 checks.
 - Ran `node --check scripts/validate-ai-harness.cjs` and `node --check scripts/validate-local.cjs`; both scripts passed syntax validation.
 - Ran `node scripts/validate-local.cjs` after integrating the AI contract as its first gate; result: passed in 143 seconds. It covered 20 AI harness checks, Django system check, 5 SSE/Celery contract tests, npm audit with 0 vulnerabilities, frontend lint, Vue compatibility inventory, production build, and authenticated Playwright smoke across series, project, prompts, and models pages.
-- The first Redis/ASGI browser attempt exposed that `config.settings.development` ignored `SQLITE_DB_PATH`; the smoke now explicitly uses `config.settings.production`, which supports a disposable SQLite path.
+- The first Redis/ASGI browser attempt exposed that `config.settings.development` ignored `SQLITE_DB_PATH`; development settings now resolve that path correctly, so the smoke explicitly uses `config.settings.development` with a disposable SQLite database. Production settings remain PostgreSQL-only.
 - The second Redis/ASGI browser attempt reached the Django SSE view and Redis subscription but timed out before EventSource `open`. Local inspection of Django 3.2.15 proved its ASGI handler synchronously iterates streaming responses and blocks the event loop.
 - Added `ProjectSSEASGIApplication`, its async contract tests, and the project SSE routing wrapper in `backend/config/asgi.py`.
 - Ran `node scripts/validate-streaming-local.cjs --require-redis` against a temporary local Redis on 2026-07-13; result: passed in 58.8 seconds. Eight SSE/Celery/ASGI tests passed, Redis Pub/Sub passed, two SSE responses returned HTTP 200, non-terminal `done` kept both all-stage connections alive, and `pipeline_done`/`pipeline_error` reached the Vue UI and cleared recovery markers.
@@ -120,7 +135,11 @@
 - The first pull-request workflow runs failed during job setup because `astral-sh/setup-uv@v8` was not a resolvable tag. Both workflows now pin the official v8.1.0 commit `08807647e7069bb48b6ef5acd8ec9567f424441b`, and the AI harness enforces that pin.
 - The next pull-request runs reached their final browser-smoke steps but did not exit because Linux cleanup terminated only the `npm`/`uv` parent process. Both smoke scripts now start detached process groups on non-Windows systems and terminate the full group with a negative PID; the AI harness enforces this cleanup contract.
 - Pull request #1 remote run number 3 passed both `Validation` and `Streaming Redis Validation` on GitHub's Ubuntu 24.04 runner after the setup-uv pin and Linux process-group cleanup fixes.
+- During the 2026-07-13 hybrid implementation, a fresh SQLite migration applied the new inference/models/content migrations and produced the safe seed counts without activating real local Providers or non-zero budgets.
+- Targeted hybrid backend tests and Runtime Agent contract tests were run during implementation; final delivery must report the newest rerun rather than relying on these intermediate counts.
+- `docs/local-ai/BENCHMARK_REPORT.md` remains explicitly `未执行`; no Ollama/FLUX/LightX2V/Wan quality, latency, VRAM, RAM, or overnight-run result has been invented.
+- Extended `scripts/validate-ai-harness.cjs` to cover hybrid privacy/price/budget gates, safe seed defaults, secret masking, Runtime Agent v1/resource contracts, Windows download safety, the local-AI manual index, and all three secret-free `not_run` benchmark case sets; `node scripts/validate-ai-harness.cjs` passed all 44 checks on 2026-07-13.
 
 ## Next Action
 
-Add a deterministic Celery worker + mock-provider pipeline smoke if worker orchestration becomes the next reliability bottleneck; the local and GitHub Redis/Daphne/EventSource/Vue transport chain is now proven.
+Run the full final validation matrix, then perform the first controlled activation in this order: disposable PostgreSQL/Redis recovery and concurrency proof, Windows Runtime Agent dry-run/install, pinned local text-model benchmark, pinned image/edit benchmark, and only then the video/hardware benchmark. Keep real local Providers inactive and paid budgets at `0` until the matching evidence and rollback check are recorded.

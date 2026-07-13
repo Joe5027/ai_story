@@ -10,6 +10,15 @@ flowchart LR
   Series --> Project["Project / Episode"]
   Project --> ProjectStage["ProjectStage"]
   Project --> ProjectModelConfig["ProjectModelConfig"]
+  Project --> ProjectAISettings["ProjectAISettings"]
+  Project --> GenerationRoute["GenerationRoute"]
+  GenerationRoute --> GenerationTarget["GenerationTarget"]
+  GenerationTarget --> ModelProvider
+  GenerationTarget --> RuntimeNode["RuntimeNode"]
+  Project --> GenerationWorkItem["GenerationWorkItem"]
+  GenerationWorkItem --> MediaArtifact["MediaArtifact"]
+  GenerationWorkItem --> BudgetReservation["BudgetReservation"]
+  BudgetReservation --> ProviderPriceRate["ProviderPriceRate"]
   Project --> ProjectAssetBinding["ProjectAssetBinding"]
   Project --> ContentRewrite["ContentRewrite"]
   Project --> Storyboard["Storyboard"]
@@ -47,6 +56,33 @@ flowchart TB
   Tasks --> Media["storage / media outputs"]
 ```
 
+## Hybrid Inference Graph
+
+```mermaid
+flowchart LR
+  Request["Project generation request"] --> Router["RoutingService / HybridInferenceService"]
+  Router --> LocalTargets["local_primary / local_secondary"]
+  LocalTargets --> AgentClient["RuntimeAgentClient"]
+  AgentClient --> Agent["FastAPI Runtime Agent :9100"]
+  Agent --> Journal["Agent SQLite WAL journal"]
+  Agent --> GPU["gpu resource group capacity 1"]
+  Agent --> Motion["cpu_motion capacity 2"]
+  GPU --> Ollama["Ollama adapter"]
+  GPU --> Comfy["ComfyUI adapter"]
+  GPU --> Light["LightX2V adapter"]
+  Motion --> FFmpeg["FFmpeg motion adapter"]
+
+  LocalTargets -->|"technical/contract failure only"| CloudAuth["Project cloud authorization"]
+  CloudAuth --> Price["Effective ProviderPriceRate"]
+  Price --> Budget["Project + daily + monthly reservation"]
+  Budget --> Paid["paid_fallback Provider"]
+  Paid --> Ledger["ModelUsageLog + BudgetReservation"]
+  Agent --> Artifact["MediaArtifact"]
+  Paid --> Artifact
+```
+
+The cloud edge is conjunctive and ordered: authorization, price, and budget must all pass before an external generation POST. Missing configuration fails closed. Subjective quality dissatisfaction has no automatic edge to `paid_fallback`; the UI must create an explicit, estimated API-regeneration request.
+
 ## Repo Control Graph
 
 ```mermaid
@@ -60,6 +96,10 @@ flowchart LR
   Harness --> Knowledge["docs/knowledge-graph.md"]
   Harness --> Memory["docs/long-term-memory.md"]
   Harness --> Automation["docs/automation-guardrails.md"]
+  Harness --> LocalDocs["docs/local-ai/"]
+  Harness --> Benchmarks["benchmarks/local-ai/"]
+  Harness --> RuntimeAgent["runtime_agent/"]
+  Harness --> WindowsScripts["scripts/local-ai/"]
   ProjectMap --> Knowledge["docs/knowledge-graph.md"]
   ProjectMap --> Memory["docs/long-term-memory.md"]
   Done --> Automation["docs/automation-guardrails.md"]
@@ -79,6 +119,13 @@ flowchart LR
 - All-stage EventSource connections must survive `done` and terminate only on `pipeline_done` or `pipeline_error`; the browser smoke verifies both terminal branches reach Vue UI.
 - Vue Router requires auth on core routes; API clients should assume JWT/session auth unless an endpoint explicitly allows anonymous access.
 - Page assistant/OpenCode integration crosses `frontend/src/services/pageAgent/`, `docs/agent_api.md`, `backend/config/settings/base.py`, and the optional `apps.agent` route surface.
+- `ProjectAISettings` owns per-project quality, cloud-data authorization, and project budget. Cloud authorization must record actor/time and cannot be inferred from choosing an API Provider.
+- `GenerationRoute` resolves ordered local/API targets; the paid edge is guarded by `ProviderPriceRate` and `BudgetReservation`, never by a provider URL heuristic.
+- `GenerationWorkItem` is the durable business state machine (`waiting/leased/running/retry_wait/succeeded/failed/cancelled`). Runtime Agent job state is node-local and cannot replace the Django work-item record.
+- Redis resource leases serialize GPU work across local providers; Agent resource semaphores provide a second node-local capacity boundary. Owner-checked TTL renewal/release prevents one worker from unlocking another.
+- `MediaArtifact` holds storage-neutral hashes/metadata and lifecycle (`source/intermediate/failed/final`). GeneratedImage/EditedImage/GeneratedVideo remain compatible content records linked to it.
+- Runtime Agent never reads the Django business database and never holds paid Provider keys. Its Bearer token protects non-loopback requests; remote nodes additionally require TLS.
+- `benchmarks/local-ai/` fixes secret-free inputs/seeds. `docs/local-ai/BENCHMARK_REPORT.md` remains “not run” until target-machine model/workflow hashes and measurements exist.
 
 ## Drift Watchlist
 
@@ -86,3 +133,5 @@ flowchart LR
 - `config/celery_app.py` is the current Celery app path; reject future drift back to `config/celery.py`.
 - Some historical docs mark frontend prompt pages as incomplete even though current source includes prompt views and store modules.
 - API docs in feature guides may use old line counts and endpoint assumptions; verify against current router and ViewSets.
+- Seeded local Providers are intentionally inactive and budgets are `0`. Mock Agent/API contract success must not be interpreted as real Ollama/FLUX/Wan availability.
+- PostgreSQL is the production truth for row-lock budget and work-item concurrency; SQLite remains the development and single-process contract path.

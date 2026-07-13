@@ -5,8 +5,10 @@
 """
 
 import logging
+import uuid
 from typing import Dict, Any
 from celery.exceptions import TaskRevokedError
+from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
 
@@ -20,11 +22,43 @@ from apps.content.processors.multi_grid_image_stage import MultiGridImageStagePr
 from apps.content.processors.image_edit_stage import ImageEditStageProcessor
 from apps.content.processors.image2video_stage import Image2VideoStageProcessor
 from apps.projects.models import Project, ProjectStage
+from apps.projects.paid_safety import pipeline_direct_api_providers
+from apps.inference.services.stage_planner import StageWorkItemPlanner
 from apps.projects.queue_service import complete_episode_task_by_celery_id
 from apps.projects.utils import get_project_stage_order, get_stage_template_states, is_stage_template_enabled
 from config.celery_app import app
 
 logger = logging.getLogger(__name__)
+
+
+def _plan_v2_stage(
+    *, project, stage_name, task_id, publisher, storyboard_ids=None,
+    force_regenerate=False, runtime_overrides=None,
+):
+    """功能开关开启时只规划/派发工作项，不再进入旧 Processor 大循环。"""
+
+    if not getattr(settings, 'AI_ROUTER_V2_ENABLED', False):
+        return None
+    plan = StageWorkItemPlanner.plan_stage(
+        project=project,
+        stage_type=stage_name,
+        storyboard_ids=storyboard_ids,
+        force_regenerate=force_regenerate,
+        runtime_overrides=runtime_overrides or {},
+        stage_execution_id=task_id or uuid.uuid4(),
+        enqueue=True,
+    )
+    publisher.publish_stage_update(
+        status='processing',
+        progress=0,
+        message=f'已创建 {len(plan.work_items)} 个可恢复工作项，等待能力队列执行',
+    )
+    return {
+        'success': True,
+        'queued': True,
+        'stage_execution_id': str(plan.stage_execution_id),
+        'work_item_ids': [str(item.pk) for item in plan.work_items],
+    }
 
 
 def _skip_stage(stage: ProjectStage, message: str) -> None:
@@ -42,15 +76,27 @@ def _project_task_cache_key(project_id: str) -> str:
 
 
 def _unregister_project_task(project_id: str, task_id: str) -> None:
-    task_ids = cache.get(_project_task_cache_key(project_id), [])
+    try:
+        task_ids = cache.get(_project_task_cache_key(project_id), [])
+    except Exception as error:
+        # Celery/数据库才是任务事实源；辅助缓存故障不能覆盖真实执行结果。
+        logger.warning('读取项目任务辅助缓存失败: %s', error)
+        return
     if not task_ids:
         return
 
     remaining_task_ids = [current_task_id for current_task_id in task_ids if current_task_id != task_id]
-    if remaining_task_ids:
-        cache.set(_project_task_cache_key(project_id), remaining_task_ids, timeout=24 * 60 * 60)
-    else:
-        cache.delete(_project_task_cache_key(project_id))
+    try:
+        if remaining_task_ids:
+            cache.set(
+                _project_task_cache_key(project_id),
+                remaining_task_ids,
+                timeout=24 * 60 * 60,
+            )
+        else:
+            cache.delete(_project_task_cache_key(project_id))
+    except Exception as error:
+        logger.warning('更新项目任务辅助缓存失败: %s', error)
 
 
 def _get_missing_image_storyboard_ids(
@@ -145,7 +191,8 @@ def execute_llm_stage(
     project_id: str,
     stage_name: str,
     input_data: Dict[str, Any],
-    user_id: int
+    user_id: int,
+    use_work_items: bool = True,
 ) -> Dict[str, Any]:
     """
     执行LLM阶段任务 (文案改写/分镜生成/运镜生成)
@@ -198,6 +245,15 @@ def execute_llm_stage(
             progress=0,
             message=f'开始执行{stage.get_stage_type_display()}'
         )
+
+        v2_result = _plan_v2_stage(
+            project=project,
+            stage_name=stage_name,
+            task_id=task_id,
+            publisher=publisher,
+        ) if use_work_items else None
+        if v2_result is not None:
+            return {**v2_result, 'task_id': task_id, 'channel': channel}
 
         # 创建处理器
         processor = AssetExtractionStageProcessor() if stage_name == 'asset_extraction' else LLMStageProcessor(stage_type=stage_name)
@@ -332,7 +388,8 @@ def execute_text2image_stage(
     project_id: str,
     storyboard_ids: list = None,
     force_regenerate: bool = False,
-    user_id: int = None
+    user_id: int = None,
+    use_work_items: bool = True,
 ) -> Dict[str, Any]:
     """
     执行文生图阶段任务
@@ -390,6 +447,17 @@ def execute_text2image_stage(
             progress=0,
             message='开始生成图片'
         )
+
+        v2_result = _plan_v2_stage(
+            project=project,
+            stage_name=stage_name,
+            task_id=task_id,
+            publisher=publisher,
+            storyboard_ids=pending_storyboard_ids,
+            force_regenerate=force_regenerate,
+        ) if use_work_items else None
+        if v2_result is not None:
+            return {**v2_result, 'task_id': task_id, 'channel': channel}
 
         # 创建处理器
         processor = Text2ImageStageProcessor()
@@ -676,6 +744,7 @@ def execute_image_edit_stage(
     strength: float = 0.35,
     width: int = None,
     height: int = None,
+    use_work_items: bool = True,
 ) -> Dict[str, Any]:
     """执行图片编辑阶段任务"""
     task_id = self.request.id
@@ -707,6 +776,17 @@ def execute_image_edit_stage(
         stage.save()
 
         publisher.publish_stage_update(status='processing', progress=0, message='开始执行图片编辑')
+        v2_result = _plan_v2_stage(
+            project=project,
+            stage_name=stage_name,
+            task_id=task_id,
+            publisher=publisher,
+            storyboard_ids=storyboard_ids,
+            force_regenerate=force_regenerate,
+            runtime_overrides={'strength': strength, 'width': width, 'height': height},
+        ) if use_work_items else None
+        if v2_result is not None:
+            return {**v2_result, 'task_id': task_id, 'channel': channel}
         processor = ImageEditStageProcessor()
 
         for chunk in processor.process_stream(
@@ -815,7 +895,8 @@ def execute_image2video_stage(
     project_id: str,
     storyboard_ids: list = None,
     force_regenerate: bool = False,
-    user_id: int = None
+    user_id: int = None,
+    use_work_items: bool = True,
 ) -> Dict[str, Any]:
     """
     执行图生视频阶段任务
@@ -873,6 +954,17 @@ def execute_image2video_stage(
             progress=0,
             message='开始生成视频'
         )
+
+        v2_result = _plan_v2_stage(
+            project=project,
+            stage_name=stage_name,
+            task_id=task_id,
+            publisher=publisher,
+            storyboard_ids=pending_storyboard_ids,
+            force_regenerate=force_regenerate,
+        ) if use_work_items else None
+        if v2_result is not None:
+            return {**v2_result, 'task_id': task_id, 'channel': channel}
 
         # 创建处理器
         processor = Image2VideoStageProcessor()
@@ -1144,6 +1236,13 @@ def run_full_pipeline_task(
     queue_final_status = 'failed'
 
     try:
+        direct_api_providers = list(pipeline_direct_api_providers(project))
+        if direct_api_providers:
+            names = '、'.join(provider.name for provider in direct_api_providers)
+            raise RuntimeError(
+                'PAID_PIPELINE_CONFIRMATION_REQUIRED: 完整流水线存在未逐阶段确认的 '
+                f'API Provider（{names}），已在 worker 提交模型前阻止。'
+            )
         # 项目已提前获取并用于推导实际阶段顺序
 
         # 更新项目状态
@@ -1212,7 +1311,8 @@ def run_full_pipeline_task(
                         project_id=project_id,
                         stage_name=stage_name,
                         input_data=input_data,
-                        user_id=user_id
+                        user_id=user_id,
+                        use_work_items=False,
                     )
 
                 elif stage_name == 'image_generation':
@@ -1220,7 +1320,8 @@ def run_full_pipeline_task(
                     result = execute_text2image_stage(
                         project_id=project_id,
                         storyboard_ids=None,  # 处理所有分镜
-                        user_id=user_id
+                        user_id=user_id,
+                        use_work_items=False,
                     )
 
                 elif stage_name == 'multi_grid_image':
@@ -1235,6 +1336,7 @@ def run_full_pipeline_task(
                         project_id=project_id,
                         storyboard_ids=None,
                         user_id=user_id,
+                        use_work_items=False,
                     )
 
                 elif stage_name == 'video_generation':
@@ -1242,7 +1344,8 @@ def run_full_pipeline_task(
                     result = execute_image2video_stage(
                         project_id=project_id,
                         storyboard_ids=None,  # 处理所有分镜
-                        user_id=user_id
+                        user_id=user_id,
+                        use_work_items=False,
                     )
 
                 # 检查执行结果

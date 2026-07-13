@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-13",
+  "notice": "示例清单默认全部禁止下载。启用前必须从官方来源填写固定版本 URL、精确字节数和 SHA-256，并复核许可证。",
+  "packages": [
+    {
+      "id": "qwen35-9b-ollama-q4",
+      "name": "Qwen3.5-9B 4-bit Ollama 包",
+      "component": "ollama",
+      "version": "PIN-DIGEST-BEFORE-ENABLE",
+      "license": "请以固定版本官方模型卡为准",
+      "license_url": "https://huggingface.co/Qwen/Qwen3.5-9B",
+      "size_display": "启用前填写",
+      "size_bytes": null,
+      "url": "https://example.invalid/qwen35-9b-q4.bin",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "target_relative_path": "qwen/qwen35-9b-q4/PINNED_MODEL_FILE",
+      "download_enabled": false
+    },
+    {
+      "id": "flux2-klein-4b",
+      "name": "FLUX.2 Klein 4B",
+      "component": "comfyui",
+      "version": "PIN-COMMIT-OR-REVISION-BEFORE-ENABLE",
+      "license": "Apache-2.0（仍需复核模型卡附加条款）",
+      "license_url": "https://github.com/black-forest-labs/flux2",
+      "size_display": "约 8 GB 显存需求；下载体积以官方文件为准",
+      "size_bytes": null,
+      "url": "https://example.invalid/flux2-klein-4b.safetensors",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "target_relative_path": "flux2/klein-4b/PINNED_MODEL_FILE.safetensors",
+      "download_enabled": false
+    },
+    {
+      "id": "qwen-image-edit-optional",
+      "name": "Qwen-Image/Edit（可选手动 Provider）",
+      "component": "comfyui",
+      "version": "PIN-REVISION-BEFORE-ENABLE",
+      "license": "请以固定版本官方仓库和模型卡为准",
+      "license_url": "https://github.com/QwenLM/Qwen-Image",
+      "size_display": "启用前填写",
+      "size_bytes": null,
+      "url": "https://example.invalid/qwen-image-edit.safetensors",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "target_relative_path": "qwen-image/edit/PINNED_MODEL_FILE.safetensors",
+      "download_enabled": false
+    },
+    {
+      "id": "wan22-i2v-a14b-lightx2v-4step",
+      "name": "Wan2.2 I2V A14B LightX2V 4-step 量化包",
+      "component": "lightx2v",
+      "version": "PIN-REVISION-BEFORE-ENABLE",
+      "license": "请分别复核 LightX2V 与 Wan2.2 固定版本许可证",
+      "license_url": "https://github.com/ModelTC/LightX2V",
+      "size_display": "启用前按量化文件精确填写",
+      "size_bytes": null,
+      "url": "https://example.invalid/wan22-i2v-a14b-lightx2v-4step.bin",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "target_relative_path": "lightx2v/wan22-i2v-a14b-4step/PINNED_MODEL_FILE",
+      "download_enabled": false
+    },
+    {
+      "id": "rife-optional",
+      "name": "RIFE 插帧模型（可选）",
+      "component": "motion-render",
+      "version": "PIN-REVISION-BEFORE-ENABLE",
+      "license": "请以选定实现的固定版本许可证为准",
+      "license_url": "https://github.com/hzwer/ECCV2022-RIFE",
+      "size_display": "启用前填写",
+      "size_bytes": null,
+      "url": "https://example.invalid/rife-model.bin",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "target_relative_path": "rife/PINNED_VERSION/PINNED_MODEL_FILE",
+      "download_enabled": false
+    }
+  ]
+}

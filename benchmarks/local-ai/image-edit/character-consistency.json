@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "case_set_id": "character-linxi-edit-v1",
+  "category": "image_edit",
+  "status": "not_run",
+  "contains_secrets": false,
+  "profile": "balanced",
+  "candidate_models": [
+    "pinned-local-flux-workflow",
+    "pinned-local-qwen-image-edit-workflow",
+    "configured-api-baseline"
+  ],
+  "reference_generation": {
+    "case_id": "linxi-reference-001",
+    "capability": "text2image",
+    "seed": 24071311,
+    "workflow_version": "record-at-run-time",
+    "prompt": "二维电影感动画角色设定图，19岁中国女孩林溪，短黑发略带自然卷，琥珀色眼睛，鼻梁左侧一颗小痣，深青色防水工装外套，黄铜齿轮形发夹，棕色皮质工具包，正面半身，神情专注，海雾灰蓝背景，柔和侧光，清晰五官，服饰结构明确",
+    "negative_prompt": "真人照片，名人，品牌标志，水印，签名，额外手指，重复人物，五官模糊，文字乱码",
+    "output_spec": {
+      "width": 1024,
+      "height": 1024,
+      "sample_count": 1,
+      "format": "png"
+    },
+    "identity_anchors": [
+      "短黑色自然卷发",
+      "琥珀色眼睛",
+      "鼻梁左侧小痣",
+      "黄铜齿轮形发夹",
+      "棕色皮质工具包"
+    ]
+  },
+  "edit_cases": [
+    {
+      "case_id": "linxi-raincoat-edit-001",
+      "capability": "image_edit",
+      "seed": 24071312,
+      "input_artifact": "reference_generation.output",
+      "prompt": "保持林溪的脸型、发型、眼睛颜色、鼻梁小痣、齿轮发夹和工具包完全一致；只把深青色工装外套改成明黄色防雨披，并把背景改为北岬灯塔入口的细雨清晨。保持二维电影感动画风格和半身构图。",
+      "negative_prompt": "改变身份特征，改变年龄，改变发色，移除小痣，移除发夹，更换工具包，新增人物，品牌标志，水印，文字",
+      "output_spec": {
+        "width": 1024,
+        "height": 1024,
+        "sample_count": 1,
+        "format": "png"
+      },
+      "expected_contract": {
+        "input_count": 1,
+        "must_preserve_identity_anchors": true,
+        "required_changes": [
+          "明黄色防雨披",
+          "灯塔入口",
+          "细雨清晨"
+        ],
+        "forbidden_changes": [
+          "新增人物",
+          "改变发色",
+          "移除鼻梁小痣",
+          "移除齿轮发夹"
+        ]
+      }
+    },
+    {
+      "case_id": "linxi-workbench-edit-001",
+      "capability": "image_edit",
+      "seed": 24071313,
+      "input_artifact": "reference_generation.output",
+      "prompt": "保持林溪全部身份锚点和二维电影感动画风格；改为三分之二侧身，在木制修表台前用镊子夹起逆行怀表的黄铜齿轮。服装仍为原始深青色工装外套，背景包含暖色台灯、机械零件和窗外海雾。",
+      "negative_prompt": "改变身份特征，改变服装主色，改变发色，移除小痣，移除发夹，更换工具包，新增人物，现代电子设备，品牌标志，水印，文字",
+      "output_spec": {
+        "width": 1280,
+        "height": 720,
+        "sample_count": 1,
+        "format": "png"
+      },
+      "expected_contract": {
+        "input_count": 1,
+        "must_preserve_identity_anchors": true,
+        "required_changes": [
+          "三分之二侧身",
+          "木制修表台",
+          "镊子和黄铜齿轮",
+          "暖色台灯"
+        ],
+        "forbidden_changes": [
+          "新增人物",
+          "改变深青色外套",
+          "移除身份锚点"
+        ]
+      }
+    }
+  ],
+  "machine_checks": [
+    "产物能够完整解码",
+    "格式、宽高、文件大小和 SHA-256 已记录",
+    "相同 idempotency key 不产生第二份产物",
+    "模型 digest、workflow version/hash 和 seed 已记录"
+  ],
+  "review_rubric": {
+    "blind_review": true,
+    "dimensions": [
+      "脸型与五官一致性",
+      "发型与身份锚点一致性",
+      "服装与场景修改准确性",
+      "手部和道具可用性",
+      "风格与光照连续性"
+    ],
+    "acceptance_decision": "由用户盲审填写，不在样本中预置分数"
+  },
+  "result": {
+    "status": "not_run",
+    "reference_artifact_sha256": null,
+    "measurement_path": null
+  }
+}

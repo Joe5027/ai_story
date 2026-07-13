@@ -142,10 +142,15 @@
               <input
                 v-model.trim="vendorForm.api_key"
                 type="password"
+                autocomplete="new-password"
                 class="field-input"
-                placeholder="请输入该厂商 API Key"
+                :placeholder="vendorForm.has_api_key ? `${vendorForm.api_key_masked}，重新输入后可拉取模型` : '请输入该厂商 API Key'"
                 @blur="handleVendorConnectionBlur"
               >
+              <span
+                v-if="vendorForm.has_api_key"
+                class="field-hint"
+              >服务器已保存 {{ vendorForm.api_key_masked }}，出于安全不会回显完整密钥</span>
             </label>
           </div>
 
@@ -457,6 +462,7 @@
                 <option value="text2image">文生图模型</option>
                 <option value="image2video">图生视频模型</option>
                 <option value="image_edit">图片编辑模型</option>
+                <option value="motion_render">非生成式视频运镜</option>
               </select>
             </label>
 
@@ -480,7 +486,24 @@
               <span class="field-hint">选择该模型使用的执行器类</span>
             </label>
 
-            <label class="field-block field-block-wide">
+            <label class="field-block">
+              <span class="field-label">部署方式 <em>*</em></span>
+              <select
+                v-model="manualFormData.deployment_mode"
+                class="field-input"
+                required
+                @change="handleManualDeploymentModeChange"
+              >
+                <option value="api">付费 / 外部 API</option>
+                <option value="local">本地 Runtime Agent</option>
+                <option value="mock">Mock 测试</option>
+              </select>
+            </label>
+
+            <label
+              v-if="manualFormData.deployment_mode === 'api'"
+              class="field-block field-block-wide"
+            >
               <span class="field-label">API地址 <em>*</em></span>
               <input
                 v-model="manualFormData.api_url"
@@ -489,6 +512,28 @@
                 class="field-input"
                 required
               >
+            </label>
+
+            <label
+              v-if="manualFormData.deployment_mode === 'local'"
+              class="field-block field-block-wide"
+            >
+              <span class="field-label">Runtime 节点 <em>*</em></span>
+              <select
+                v-model="manualFormData.runtime_node"
+                class="field-input"
+                required
+                :disabled="loadingNodes"
+              >
+                <option value="">{{ loadingNodes ? '节点加载中...' : '请选择运行节点' }}</option>
+                <option
+                  v-for="node in runtimeNodes"
+                  :key="node.id"
+                  :value="node.id"
+                >
+                  {{ node.name }} · {{ getNodeHealthLabel(node.health_status) }}
+                </option>
+              </select>
             </label>
 
             <label class="field-block">
@@ -502,14 +547,45 @@
               >
             </label>
 
-            <label class="field-block">
+            <label
+              v-if="manualFormData.deployment_mode === 'api'"
+              class="field-block"
+            >
               <span class="field-label">API密钥 <em>*</em></span>
               <input
                 v-model="manualFormData.api_key"
-                type="text"
+                type="password"
+                autocomplete="new-password"
                 placeholder="sk-..."
                 class="field-input"
                 required
+              >
+            </label>
+
+            <label
+              v-if="manualFormData.deployment_mode === 'local'"
+              class="field-block"
+            >
+              <span class="field-label">Runtime 模型 ID <em>*</em></span>
+              <input
+                v-model="manualFormData.runtime_model_id"
+                type="text"
+                placeholder="例如: qwen3.5:9b-q4"
+                class="field-input"
+                required
+              >
+            </label>
+
+            <label
+              v-if="manualFormData.deployment_mode === 'local'"
+              class="field-block"
+            >
+              <span class="field-label">Runtime Adapter</span>
+              <input
+                v-model="manualFormData.runtime_adapter"
+                type="text"
+                placeholder="ollama / comfyui / lightx2v"
+                class="field-input"
               >
             </label>
           </div>
@@ -770,6 +846,20 @@
                 <span class="toggle-text">{{ manualFormData.is_active ? '已激活' : '未激活' }}</span>
               </span>
             </label>
+
+            <label
+              v-if="manualFormData.deployment_mode === 'local'"
+              class="toggle-card"
+            >
+              <span class="field-label">技术失败回退能力</span>
+              <span class="toggle-inner">
+                <input
+                  v-model="manualFormData.supports_cloud_fallback"
+                  type="checkbox"
+                >
+                <span class="toggle-text">{{ manualFormData.supports_cloud_fallback ? '允许进入付费门检查' : '仅本地' }}</span>
+              </span>
+            </label>
           </div>
         </section>
 
@@ -798,6 +888,7 @@
 <script>
 import { mapActions } from 'vuex'
 import { modelProviderApi } from '@/api/models'
+import { runtimeNodeApi } from '@/api/inference'
 
 
 export default {
@@ -810,6 +901,8 @@ export default {
         vendor: '',
         capability: 'llm',
         api_key: '',
+        has_api_key: false,
+        api_key_masked: '',
         api_url: '',
         is_active: true,
         timeout: 60,
@@ -829,10 +922,15 @@ export default {
       manualFormData: {
         name: '',
         provider_type: '',
+        deployment_mode: 'api',
         api_url: '',
         api_key: '',
         model_name: '',
         executor_class: '',
+        runtime_node: '',
+        runtime_model_id: '',
+        runtime_adapter: '',
+        supports_cloud_fallback: false,
         max_tokens: 4096,
         temperature: 0.7,
         top_p: 1.0,
@@ -852,6 +950,8 @@ export default {
       },
       availableExecutors: [],
       loadingExecutors: false,
+      runtimeNodes: [],
+      loadingNodes: false,
       submittingManual: false,
       loadingVendorConfig: false
     }
@@ -969,6 +1069,8 @@ export default {
       if (!capabilities.length) {
         this.vendorForm.capability = 'llm'
         this.vendorForm.api_key = ''
+        this.vendorForm.has_api_key = false
+        this.vendorForm.api_key_masked = ''
         this.vendorForm.api_url = ''
         return
       }
@@ -990,7 +1092,7 @@ export default {
     }
   },
   async created() {
-    await this.loadVendors()
+    await Promise.all([this.loadVendors(), this.loadRuntimeNodes()])
   },
   methods: {
     ...mapActions('models', ['createProvider']),
@@ -1016,7 +1118,8 @@ export default {
         vlm: '视觉语言模型',
         text2image: '文生图',
         image2video: '图生视频',
-        image_edit: '图片编辑'
+        image_edit: '图片编辑',
+        motion_render: '非生成式视频运镜'
       }
       return labels[type] || type
     },
@@ -1039,6 +1142,8 @@ export default {
     async loadVendorConnectionConfig() {
       if (!this.vendorForm.vendor || !this.vendorForm.capability) {
         this.vendorForm.api_key = ''
+        this.vendorForm.has_api_key = false
+        this.vendorForm.api_key_masked = ''
         this.syncVendorApiUrl()
         return
       }
@@ -1049,9 +1154,10 @@ export default {
           vendor: this.vendorForm.vendor,
           capability: this.vendorForm.capability
         })
-        const savedApiKey = (response.api_key || '').trim()
         const savedApiUrl = (response.api_url || '').trim()
-        this.vendorForm.api_key = savedApiKey
+        this.vendorForm.api_key = ''
+        this.vendorForm.has_api_key = Boolean(response.has_api_key)
+        this.vendorForm.api_key_masked = response.api_key_masked || ''
         if (savedApiUrl) {
           this.vendorForm.api_url = savedApiUrl
         } else {
@@ -1069,12 +1175,14 @@ export default {
       if (!this.vendorForm.vendor || !this.vendorForm.capability) {
         return
       }
-      await modelProviderApi.updateVendorConnectionConfig({
+      const response = await modelProviderApi.updateVendorConnectionConfig({
         vendor: this.vendorForm.vendor,
         capability: this.vendorForm.capability,
         api_key: this.vendorForm.api_key,
         api_url: this.vendorForm.api_url
       })
+      this.vendorForm.has_api_key = Boolean(response.has_api_key)
+      this.vendorForm.api_key_masked = response.api_key_masked || ''
     },
 
     async handleVendorConnectionBlur() {
@@ -1205,6 +1313,31 @@ export default {
       }
     },
 
+    handleManualDeploymentModeChange() {
+      if (this.manualFormData.deployment_mode !== 'api') {
+        this.manualFormData.api_url = ''
+        this.manualFormData.api_key = ''
+      }
+      if (this.manualFormData.deployment_mode !== 'local') {
+        this.manualFormData.runtime_node = ''
+        this.manualFormData.runtime_model_id = ''
+        this.manualFormData.runtime_adapter = ''
+      }
+    },
+
+    async loadRuntimeNodes() {
+      this.loadingNodes = true
+      try {
+        const response = await runtimeNodeApi.list({ is_active: true, page_size: 500 })
+        this.runtimeNodes = Array.isArray(response) ? response : (response.results || [])
+      } catch (error) {
+        console.error('加载 Runtime 节点失败:', error)
+        this.runtimeNodes = []
+      } finally {
+        this.loadingNodes = false
+      }
+    },
+
     async loadExecutorChoices(providerType) {
       this.loadingExecutors = true
       try {
@@ -1239,6 +1372,15 @@ export default {
             vendor_source: 'manual'
           }
         }
+        if (submitData.deployment_mode !== 'api') {
+          submitData.api_url = ''
+          submitData.api_key = ''
+        }
+        if (submitData.deployment_mode !== 'local') {
+          submitData.runtime_node = null
+          submitData.runtime_model_id = ''
+          submitData.runtime_adapter = ''
+        }
         await this.createProvider(submitData)
         await this.$alert('创建成功', '操作完成', { tone: 'success' })
         this.$router.push({ name: 'ModelList' })
@@ -1252,6 +1394,15 @@ export default {
       } finally {
         this.submittingManual = false
       }
+    },
+
+    getNodeHealthLabel(status) {
+      return {
+        healthy: '健康',
+        degraded: '降级',
+        unavailable: '不可用',
+        unknown: '未知'
+      }[status] || '未知'
     }
   }
 }

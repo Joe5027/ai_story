@@ -6,7 +6,7 @@
 """
 
 from typing import Dict, Any, List
-from core.ai_client.openai_client import OpenAIClient
+from core.ai_client.factory import create_ai_client
 from apps.models.models import ModelProvider
 
 
@@ -46,7 +46,7 @@ class PromptEvaluationService:
         """初始化评估服务"""
         self.ai_client = None
 
-    async def _get_ai_client(self) -> OpenAIClient:
+    async def _get_ai_client(self):
         """
         获取AI客户端
         优先使用配置的评估专用模型,否则使用默认LLM
@@ -63,13 +63,9 @@ class PromptEvaluationService:
         if not provider:
             raise ValueError('未找到可用的LLM模型提供商')
 
-        # 创建OpenAI客户端
-        self.ai_client = OpenAIClient(
-            api_key=provider.api_key,
-            api_url=provider.api_url,
-            model_name=provider.model_name,
-            config=provider.config
-        )
+        # 该旧工具没有项目与费用确认上下文；统一工厂会对 API Provider
+        # fail closed，而本地/Mock 仍可按其 executor_class 正常运行。
+        self.ai_client = create_ai_client(provider)
 
         return self.ai_client
 

@@ -19,15 +19,18 @@ class ModelProvider(models.Model):
         ('text2image', '文生图模型'),
         ('image2video', '图生视频模型'),
         ('image_edit', '图片编辑模型'),
+        ('motion_render', '非生成式视频运镜'),
     ]
 
     # 执行器选项定义
     LLM_EXECUTORS = [
+        ('core.ai_client.runtime_agent_client.RuntimeAgentLLMClient', 'Runtime Agent 本地 LLM'),
         ('core.ai_client.openai_client.OpenAIClient', 'OpenAI兼容客户端'),
         ('core.ai_client.mock_llm_client.MockLLMClient', 'Mock LLM客户端（测试用）'),
     ]
 
     TEXT2IMAGE_EXECUTORS = [
+        ('core.ai_client.runtime_agent_client.RuntimeAgentText2ImageClient', 'Runtime Agent 本地文生图'),
         ('core.ai_client.executors.openai_images_generation_executor.OpenAIImagesGenerationExecutor', 'OpenAI Images Generations 执行器'),
         ('core.ai_client.executors.chat_completions_image_executor.ChatCompletionsImageExecutor', 'Chat Completions 图片执行器'),
         ('core.ai_client.text2image_client.Text2ImageClient', '兼容文生图客户端（旧版）'),
@@ -36,6 +39,7 @@ class ModelProvider(models.Model):
     ]
 
     IMAGE2VIDEO_EXECUTORS = [
+        ('core.ai_client.runtime_agent_client.RuntimeAgentImage2VideoClient', 'Runtime Agent 本地图生视频'),
         ('core.ai_client.image2video_client.VideoGeneratorClient', '图生视频客户端'),
         ('core.ai_client.volcengine_image2video_client.VolcengineImage2VideoClient', '火山引擎图生视频客户端'),
         ('core.ai_client.siliconflow_video_client.SiliconFlowVideoClient', '硅基流动视频客户端'),
@@ -44,6 +48,7 @@ class ModelProvider(models.Model):
     ]
 
     IMAGE_EDIT_EXECUTORS = [
+        ('core.ai_client.runtime_agent_client.RuntimeAgentImageEditClient', 'Runtime Agent 本地图片编辑'),
         ('core.ai_client.executors.openai_images_edit_executor.OpenAIImagesEditExecutor', 'OpenAI Images Edits 执行器'),
         ('core.ai_client.image_edit_client.ImageEditClient', '兼容图片编辑客户端（旧版）'),
         ('core.ai_client.mock_image_edit_client.MockImageEditClient', 'Mock 图片编辑客户端（测试用）'),
@@ -61,9 +66,44 @@ class ModelProvider(models.Model):
     )
 
     # API配置
-    api_url = models.URLField('API地址')
-    api_key = models.CharField('API密钥', max_length=512)  # 后续加密存储
+    DEPLOYMENT_MODES = [
+        ('mock', 'Mock'),
+        ('local', '本地'),
+        ('api', 'API'),
+    ]
+
+    MOTION_RENDER_EXECUTORS = [
+        ('core.ai_client.runtime_agent_client.RuntimeAgentMotionRenderClient', 'Runtime Agent FFmpeg/RIFE 运镜'),
+    ]
+    HEALTH_STATUSES = [
+        ('unknown', '未知'),
+        ('healthy', '健康'),
+        ('degraded', '降级'),
+        ('unavailable', '不可用'),
+    ]
+
+    api_url = models.URLField('API地址', blank=True, default='')
+    # 用户已选择继续明文保存；所有读取接口、日志与导出必须执行脱敏。
+    api_key = models.CharField('API密钥', max_length=512, blank=True, default='')
     model_name = models.CharField('模型名称', max_length=255)
+
+    deployment_mode = models.CharField(
+        '部署模式', max_length=10, choices=DEPLOYMENT_MODES, default='api'
+    )
+    runtime_node = models.ForeignKey(
+        'inference.RuntimeNode',
+        on_delete=models.SET_NULL,
+        related_name='providers',
+        null=True,
+        blank=True,
+        verbose_name='Runtime节点',
+    )
+    runtime_model_id = models.CharField('Runtime模型ID', max_length=255, blank=True, default='')
+    runtime_adapter = models.CharField('Runtime适配器', max_length=64, blank=True, default='')
+    supports_cloud_fallback = models.BooleanField('允许作为云端回退目标', default=False)
+    health_status = models.CharField(
+        '健康状态', max_length=20, choices=HEALTH_STATUSES, default='unknown'
+    )
 
     # LLM专用参数
     max_tokens = models.IntegerField('最大Token数', default=2000)
@@ -109,6 +149,7 @@ class ModelProvider(models.Model):
             'text2image': self.TEXT2IMAGE_EXECUTORS,
             'image2video': self.IMAGE2VIDEO_EXECUTORS,
             'image_edit': self.IMAGE_EDIT_EXECUTORS,
+            'motion_render': self.MOTION_RENDER_EXECUTORS,
         }
         return executor_map.get(self.provider_type, [])
 
@@ -196,9 +237,60 @@ class ModelUsageLog(models.Model):
 
     # 统计信息
     tokens_used = models.IntegerField('使用Token数', default=0)
+    input_tokens = models.IntegerField('输入Token数', default=0)
+    output_tokens = models.IntegerField('输出Token数', default=0)
+    image_count = models.IntegerField('图片数量', default=0)
+    video_seconds = models.DecimalField('视频秒数', max_digits=12, decimal_places=3, default=0)
     latency_ms = models.IntegerField('延迟(毫秒)', default=0)
     status = models.CharField('状态', max_length=20, default='success')
     error_message = models.TextField('错误信息', blank=True)
+    error_code = models.CharField('标准错误码', max_length=64, blank=True, default='')
+
+    # 成本账本；本地调用通常为 0，但仍记录时延与资源节点用于成本对比。
+    deployment_mode = models.CharField('部署模式', max_length=10, default='api')
+    estimated_cost = models.DecimalField('预计成本', max_digits=18, decimal_places=6, default=0)
+    settled_cost = models.DecimalField('结算成本', max_digits=18, decimal_places=6, default=0)
+    currency = models.CharField('币种', max_length=3, default='CNY')
+    price_rate = models.ForeignKey(
+        'inference.ProviderPriceRate',
+        on_delete=models.SET_NULL,
+        related_name='usage_logs',
+        null=True,
+        blank=True,
+        verbose_name='价目表版本',
+    )
+    work_item = models.ForeignKey(
+        'inference.GenerationWorkItem',
+        on_delete=models.SET_NULL,
+        related_name='usage_logs',
+        null=True,
+        blank=True,
+        verbose_name='工作项',
+    )
+    runtime_node = models.ForeignKey(
+        'inference.RuntimeNode',
+        on_delete=models.SET_NULL,
+        related_name='usage_logs',
+        null=True,
+        blank=True,
+        verbose_name='Runtime节点',
+    )
+    attempt_number = models.PositiveIntegerField('尝试序号', default=1)
+    idempotency_key = models.CharField('幂等键', max_length=128, blank=True, default='')
+    fallback_from = models.ForeignKey(
+        ModelProvider,
+        on_delete=models.SET_NULL,
+        related_name='fallback_source_logs',
+        null=True,
+        blank=True,
+        verbose_name='回退来源',
+    )
+    fallback_reason = models.CharField('回退原因', max_length=255, blank=True, default='')
+    request_summary = models.JSONField('脱敏请求摘要', default=dict, blank=True)
+    media_hashes = models.JSONField('媒体哈希', default=list, blank=True)
+    media_dimensions = models.JSONField('媒体尺寸', default=list, blank=True)
+    started_at = models.DateTimeField('开始时间', null=True, blank=True)
+    finished_at = models.DateTimeField('结束时间', null=True, blank=True)
 
     # 关联信息
     project_id = models.UUIDField('项目ID', null=True, blank=True)

@@ -315,7 +315,9 @@ class ModelProviderVendorServiceTestCase(APITestCase):
 
 class ModelProviderVendorViewSetTestCase(APITestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username='vendor-api-user', password='secret123')
+        self.user = User.objects.create_user(
+            username='vendor-api-user', password='secret123', is_staff=True
+        )
         self.client.force_authenticate(self.user)
 
     def test_builtin_vendors_endpoint_returns_results(self):
@@ -602,7 +604,9 @@ class ModelProviderVendorViewSetTestCase(APITestCase):
         })
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['api_key'], 'sk-saved')
+        self.assertNotIn('api_key', response.data)
+        self.assertTrue(response.data['has_api_key'])
+        self.assertEqual(response.data['api_key_masked'], '****aved')
         self.assertEqual(response.data['api_url'], 'https://gateway.example.com/v1/chat/completions')
 
     def test_vendor_connection_config_put_persists_api_key_and_url(self):

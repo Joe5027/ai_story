@@ -14,6 +14,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.models.models import ModelProvider
+from apps.projects.models import Project
+from apps.inference.services.hybrid import HybridExecutionFailed, HybridInferenceService
 from apps.models.serializers import ModelProviderListSerializer
 from core.ai_client.base import AIResponse
 from core.ai_client.factory import create_ai_client
@@ -22,6 +24,72 @@ from core.ai_client.schemas import ImageEditRequest, Text2ImageRequest
 from core.utils.file_storage import image_storage, video_storage
 
 logger = logging.getLogger(__name__)
+
+
+class ProxyExecutionError(RuntimeError):
+    """带稳定错误码的代理执行拒绝或上游失败。"""
+
+    def __init__(self, code, message, http_status=status.HTTP_400_BAD_REQUEST):
+        super().__init__(message)
+        self.code = code
+        self.http_status = http_status
+
+
+def _project_for_execution(request, provider):
+    project_id = request.data.get('project_id')
+    if not project_id:
+        if provider.deployment_mode == 'api':
+            raise ProxyExecutionError(
+                'PROJECT_REQUIRED',
+                'API 调用必须绑定项目，才能执行隐私、价格与预算校验。',
+            )
+        return None
+    project = Project.objects.filter(pk=project_id, user=request.user).first()
+    if not project:
+        raise ProxyExecutionError('PROJECT_NOT_FOUND', '项目不存在或无权访问。', 404)
+    return project
+
+
+def _run_guarded(request, provider, capability, stage_type, parameters, usage, invoke):
+    """所有 API 执行统一经过项目授权、手工价目表和预算三重门。"""
+
+    project = _project_for_execution(request, provider)
+    if provider.deployment_mode == 'api' and request.data.get('confirm_paid_generation') is not True:
+        raise ProxyExecutionError(
+            'PAID_CONFIRMATION_REQUIRED',
+            '选择 API Provider 时必须先确认本次可能产生费用。',
+        )
+    if provider.deployment_mode == 'api':
+        confirmed_max = request.data.get('confirmed_max_cost_cny')
+        if confirmed_max in (None, ''):
+            raise ProxyExecutionError(
+                'BUDGET_DENIED',
+                '选择 API Provider 时必须提交本次确认的最大费用。',
+            )
+        parameters = {
+            **(parameters or {}),
+            'confirmed_max_cost_cny': str(confirmed_max),
+        }
+    if project is None:
+        # Mock/本地调试可兼容旧无项目调用；它们不会进入付费门。
+        return invoke(provider, parameters, False)
+    try:
+        execution = HybridInferenceService.execute(
+            project=project,
+            capability=capability,
+            stage_type=stage_type,
+            invoke=invoke,
+            request_parameters=parameters,
+            usage_estimate=usage,
+            explicit_provider=provider,
+            manual_api=provider.deployment_mode == 'api',
+        )
+        return execution.value
+    except HybridExecutionFailed as error:
+        http_status = 403 if error.code in {
+            'CLOUD_NOT_AUTHORIZED', 'BUDGET_DENIED', 'PRICE_MISSING'
+        } else 502
+        raise ProxyExecutionError(error.code, str(error), http_status)
 
 
 PROVIDER_TYPE_LABELS = {
@@ -112,6 +180,8 @@ def _build_provider_payload(provider: ModelProvider) -> Dict[str, Any]:
         'provider_type': provider.provider_type,
         'provider_type_display': provider.get_provider_type_display(),
         'model_name': provider.model_name,
+        'deployment_mode': provider.deployment_mode,
+        'health_status': provider.health_status,
     }
 
 
@@ -134,7 +204,12 @@ def _pick_provider(provider_type: str, model: str = '') -> Optional[ModelProvide
         except (ValueError, TypeError):
             pass
 
-    return queryset.first()
+    # 未显式选择时优先免费本地/Mock。API 只作为最后候选，且后续仍需三重门。
+    for mode in ('local', 'mock', 'api'):
+        provider = queryset.filter(deployment_mode=mode).first()
+        if provider:
+            return provider
+    return None
 
 
 class AIModelsView(APIView):
@@ -195,10 +270,6 @@ class ChatCompletionsProxyView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        headers = {
-            'Authorization': f'Bearer {provider.api_key}',
-            'Content-Type': 'application/json',
-        }
         payload = {
             'model': provider.model_name,
             'messages': messages,
@@ -208,28 +279,72 @@ class ChatCompletionsProxyView(APIView):
         }
 
         try:
-            start_time = time.time()
-            upstream_response = requests.post(
-                provider.api_url,
-                headers=headers,
-                json=payload,
-                timeout=provider.timeout,
+            started = time.time()
+
+            def invoke(selected_provider, parameters, repaired_structure=False):
+                if selected_provider.deployment_mode in {'local', 'mock'}:
+                    client = create_ai_client(selected_provider)
+                    prompt = '\n'.join(
+                        f"{item.get('role', 'user')}: {item.get('content', '')}"
+                        for item in parameters['messages']
+                    )
+                    response = client._generate_text(
+                        prompt,
+                        max_tokens=parameters['max_tokens'],
+                        temperature=parameters['temperature'],
+                        repair_structure=repaired_structure,
+                        project_id=str(request.data.get('project_id') or ''),
+                        stage_type='chat',
+                    )
+                    if not response.success:
+                        failure = RuntimeError(response.error or '本地 LLM 执行失败')
+                        failure.code = str(response.error or 'RUNTIME_CRASH').split(':', 1)[0]
+                        raise failure
+                    return {
+                        'id': f'chatcmpl-{uuid.uuid4().hex[:8]}',
+                        'object': 'chat.completion',
+                        'model': selected_provider.model_name,
+                        'choices': [{
+                            'index': 0,
+                            'message': {'role': 'assistant', 'content': response.text},
+                            'finish_reason': 'stop',
+                        }],
+                        'usage': (response.metadata or {}).get('usage', {}),
+                    }
+
+                upstream_response = requests.post(
+                    selected_provider.api_url,
+                    headers={
+                        'Authorization': f'Bearer {selected_provider.api_key}',
+                        'Content-Type': 'application/json',
+                    },
+                    json={**parameters, 'model': selected_provider.model_name},
+                    timeout=selected_provider.timeout,
+                )
+                if upstream_response.status_code != 200:
+                    failure = RuntimeError(
+                        f'上游 LLM API 返回 HTTP {upstream_response.status_code}'
+                    )
+                    failure.code = (
+                        'INVALID_REQUEST' if upstream_response.status_code < 500
+                        else 'RUNTIME_CRASH'
+                    )
+                    raise failure
+                return upstream_response.json()
+
+            result = _run_guarded(
+                request,
+                provider,
+                'llm',
+                'chat',
+                payload,
+                {
+                    'input_tokens': max(1, len(str(messages)) // 2),
+                    'output_tokens': int(max_tokens),
+                },
+                invoke,
             )
-            latency_ms = int((time.time() - start_time) * 1000)
-
-            if upstream_response.status_code != 200:
-                logger.error(
-                    '上游 LLM 请求失败: status=%s provider=%s body=%s',
-                    upstream_response.status_code,
-                    provider.name,
-                    upstream_response.text[:300],
-                )
-                return Response(
-                    {'error': f'上游 API 请求失败: {upstream_response.status_code}'},
-                    status=status.HTTP_502_BAD_GATEWAY,
-                )
-
-            result = upstream_response.json()
+            latency_ms = int((time.time() - started) * 1000)
             if 'id' not in result:
                 result['id'] = f'chatcmpl-{uuid.uuid4().hex[:8]}'
             result.setdefault('model', provider.model_name)
@@ -240,6 +355,10 @@ class ChatCompletionsProxyView(APIView):
             })
             return Response(result)
 
+        except ProxyExecutionError as exc:
+            return Response(
+                {'error': {'code': exc.code, 'message': str(exc)}}, status=exc.http_status
+            )
         except requests.Timeout:
             return Response(
                 {'error': '上游 API 请求超时'},
@@ -306,6 +425,7 @@ class ImagesGenerationsProxyView(APIView):
                     'model', 'prompt', 'negative_prompt', 'mask', 'mask_image', 'width', 'height',
                     'image', 'images', 'source_images', 'aspect_ratio', 'ratio', 'n', 'sample_count',
                     'seed', 'strength', 'mode', 'edit_mode', 'size', 'provider_type', 'force_edit',
+                    'project_id', 'confirm_paid_generation',
                 }
             },
         }
@@ -352,40 +472,69 @@ class ImagesGenerationsProxyView(APIView):
             )
 
         try:
-            client = create_ai_client(provider)
-            if provider_type == 'image_edit':
-                ai_response = ImageGenerationService.edit(
-                    provider,
-                    ImageEditRequest(
-                        source_images=context['reference_images'],
-                        prompt=context['prompt'],
-                        mask_image=context['mask'],
-                        negative_prompt=context['negative_prompt'],
-                        strength=context['strength'],
-                        width=context['width'],
-                        height=context['height'],
-                        edit_mode=context['mode'] or 'img2img',
-                        extra=context['extra'],
-                    ),
-                    client=client,
-                )
-            else:
-                ai_response = ImageGenerationService.generate(
-                    provider,
+            def invoke(selected_provider, parameters, repaired_structure=False):
+                client = create_ai_client(selected_provider)
+                if provider_type == 'image_edit':
+                    return ImageGenerationService.edit(
+                        selected_provider,
+                        ImageEditRequest(
+                            source_images=parameters['reference_images'],
+                            prompt=parameters['prompt'],
+                            mask_image=parameters['mask'],
+                            negative_prompt=parameters['negative_prompt'],
+                            strength=parameters['strength'],
+                            width=parameters['width'],
+                            height=parameters['height'],
+                            edit_mode=parameters['mode'] or 'img2img',
+                            extra={
+                                **parameters['extra'],
+                                'project_id': str(request.data.get('project_id') or ''),
+                                'stage_type': 'image_edit',
+                            },
+                        ),
+                        client=client,
+                    )
+                return ImageGenerationService.generate(
+                    selected_provider,
                     Text2ImageRequest(
-                        prompt=context['prompt'],
-                        negative_prompt=context['negative_prompt'],
-                        reference_images=context['reference_images'],
-                        width=context['width'],
-                        height=context['height'],
-                        aspect_ratio=context['aspect_ratio'],
-                        sample_count=context['sample_count'],
-                        seed=context['seed'],
-                        extra=context['extra'],
+                        prompt=parameters['prompt'],
+                        negative_prompt=parameters['negative_prompt'],
+                        reference_images=parameters['reference_images'],
+                        width=parameters['width'],
+                        height=parameters['height'],
+                        aspect_ratio=parameters['aspect_ratio'],
+                        sample_count=parameters['sample_count'],
+                        seed=parameters['seed'],
+                        extra={
+                            **parameters['extra'],
+                            'project_id': str(request.data.get('project_id') or ''),
+                            'stage_type': provider_type,
+                        },
                     ),
                     client=client,
                 )
+
+            width = context['width'] or 1024
+            height = context['height'] or 1024
+            ai_response = _run_guarded(
+                request,
+                provider,
+                provider_type,
+                provider_type,
+                context,
+                {
+                    'image_count': context['sample_count'],
+                    'width': width,
+                    'height': height,
+                    'sample_count': context['sample_count'],
+                },
+                invoke,
+            )
             return self._normalize_image_result(ai_response, provider, provider_type)
+        except ProxyExecutionError as exc:
+            return Response(
+                {'error': {'code': exc.code, 'message': str(exc)}}, status=exc.http_status
+            )
         except Exception as exc:
             logger.error('图片代理异常: %s', exc, exc_info=True)
             return Response(
@@ -453,27 +602,69 @@ class VideosGenerationsProxyView(APIView):
             )
 
         try:
-            client = create_ai_client(provider)
-            raw_result = client._generate_video(
-                prompt=prompt,
-                model=provider.model_name,
-                image_uri=image_inputs[0] if image_inputs else '',
-                image_uris=image_inputs,
-                image_base64=image_base64,
-                image_base64s=image_base64s,
-                image_mime_type=request.data.get('image_mime_type', 'image/jpeg'),
-                duration_seconds=_parse_int(request.data.get('duration_seconds'), _parse_int(request.data.get('duration'), 5)) or 5,
-                sample_count=_parse_int(request.data.get('sample_count'), _parse_int(request.data.get('n'), 1)) or 1,
-                aspect_ratio=request.data.get('aspect_ratio') or request.data.get('ratio') or '16:9',
-                resolution=request.data.get('resolution'),
-                seed=_parse_int(request.data.get('seed')),
-                negative_prompt=request.data.get('negative_prompt'),
-                generate_audio=request.data.get('generate_audio', True),
-                camera_movement_description=(
+            duration_seconds = _parse_int(
+                request.data.get('duration_seconds'), _parse_int(request.data.get('duration'), 5)
+            ) or 5
+            sample_count = _parse_int(
+                request.data.get('sample_count'), _parse_int(request.data.get('n'), 1)
+            ) or 1
+            parameters = {
+                'prompt': prompt,
+                'image_inputs': image_inputs,
+                'image_base64': image_base64,
+                'image_base64s': image_base64s,
+                'image_mime_type': request.data.get('image_mime_type', 'image/jpeg'),
+                'duration_seconds': duration_seconds,
+                'sample_count': sample_count,
+                'aspect_ratio': request.data.get('aspect_ratio') or request.data.get('ratio') or '16:9',
+                'resolution': request.data.get('resolution'),
+                'seed': _parse_int(request.data.get('seed')),
+                'negative_prompt': request.data.get('negative_prompt'),
+                'generate_audio': request.data.get('generate_audio', True),
+                'camera_movement_description': (
                     request.data.get('camera_movement_description')
                     or request.data.get('cameraMovementDescription')
                     or ''
                 ),
+            }
+
+            def invoke(selected_provider, call_parameters, repaired_structure=False):
+                client = create_ai_client(selected_provider)
+                return client._generate_video(
+                    prompt=call_parameters['prompt'],
+                    model=selected_provider.model_name,
+                    image_uri=(
+                        call_parameters['image_inputs'][0]
+                        if call_parameters['image_inputs'] else ''
+                    ),
+                    image_uris=call_parameters['image_inputs'],
+                    image_base64=call_parameters['image_base64'],
+                    image_base64s=call_parameters['image_base64s'],
+                    image_mime_type=call_parameters['image_mime_type'],
+                    duration_seconds=call_parameters['duration_seconds'],
+                    sample_count=call_parameters['sample_count'],
+                    aspect_ratio=call_parameters['aspect_ratio'],
+                    resolution=call_parameters['resolution'],
+                    seed=call_parameters['seed'],
+                    negative_prompt=call_parameters['negative_prompt'],
+                    generate_audio=call_parameters['generate_audio'],
+                    camera_movement_description=call_parameters['camera_movement_description'],
+                    project_id=str(request.data.get('project_id') or ''),
+                    stage_type='image2video',
+                )
+
+            raw_result = _run_guarded(
+                request,
+                provider,
+                'image2video',
+                'image2video',
+                parameters,
+                {
+                    'video_seconds': duration_seconds * sample_count,
+                    'video_tasks': sample_count,
+                    'sample_count': sample_count,
+                },
+                invoke,
             )
             result = self._normalize_video_result(raw_result)
             if not result['success']:
@@ -491,6 +682,10 @@ class VideosGenerationsProxyView(APIView):
                 'data': result['data'],
                 'metadata': result['metadata'],
             })
+        except ProxyExecutionError as exc:
+            return Response(
+                {'error': {'code': exc.code, 'message': str(exc)}}, status=exc.http_status
+            )
         except Exception as exc:
             logger.error('视频代理异常: %s', exc, exc_info=True)
             return Response(

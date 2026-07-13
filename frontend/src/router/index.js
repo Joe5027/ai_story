@@ -205,6 +205,31 @@ const routes = [
     ],
   },
   {
+    path: '/local-ai',
+    component: () => import('@/views/Layout.vue'),
+    meta: { requiresAuth: true },
+    children: [
+      {
+        path: '',
+        name: 'LocalAINodes',
+        component: () => import('@/views/local-ai/LocalAIConsole.vue'),
+        meta: { title: '本地 AI 运行节点' },
+      },
+      {
+        path: 'routes',
+        name: 'LocalAIRoutes',
+        component: () => import('@/views/local-ai/LocalAIConsole.vue'),
+        meta: { title: 'AI 路由与价目表' },
+      },
+      {
+        path: 'budget',
+        name: 'LocalAIBudget',
+        component: () => import('@/views/local-ai/LocalAIConsole.vue'),
+        meta: { title: 'AI 预算与调用账本' },
+      },
+    ],
+  },
+  {
     path: '/404',
     name: 'NotFound',
     component: () => import('@/views/NotFound.vue'),

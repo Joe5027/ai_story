@@ -25,6 +25,8 @@ def create_mock_providers():
             'api_url': 'http://localhost:8010/api/mock/llm/',
             'api_key': 'mock-api-key-not-required',
             'model_name': 'mock-llm-v1',
+            'deployment_mode': 'mock',
+            'health_status': 'healthy',
             'max_tokens': 4096,
             'temperature': 0.7,
             'top_p': 1.0,
@@ -51,6 +53,8 @@ def create_mock_providers():
             'api_url': 'http://localhost:8010/api/mock',
             'api_key': 'mock-api-key-not-required',
             'model_name': 'mock-text2image-v1',
+            'deployment_mode': 'mock',
+            'health_status': 'healthy',
             'timeout': 60,
             'is_active': True,
             'priority': 100,
@@ -76,6 +80,8 @@ def create_mock_providers():
             'api_url': 'http://localhost:8010/api/mock',
             'api_key': 'mock-api-key-not-required',
             'model_name': 'mock-image2video-v1',
+            'deployment_mode': 'mock',
+            'health_status': 'healthy',
             'timeout': 120,
             'is_active': True,
             'priority': 100,
@@ -91,6 +97,12 @@ def create_mock_providers():
     )
     if created:
         print(f"✓ 已创建 Mock 图生视频提供商: {mock_image2video.name}")
+
+    # 旧数据库可能已由早期 signal 建立 Mock 记录；执行器是明确证据，修正
+    # deployment_mode 不依赖 localhost 猜测，也不会误标真实本地 Provider。
+    ModelProvider.objects.filter(
+        executor_class__icontains='mock'
+    ).update(deployment_mode='mock', health_status='healthy')
 
 
 def _ensure_default_prompt_template_set():

@@ -5,8 +5,11 @@
 """
 
 
+import hashlib
 import json
+import logging
 import uuid
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from celery.result import AsyncResult
@@ -15,6 +18,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.db.models import Q
+from django.db import transaction
 from django.http import StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -29,12 +33,33 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.models.models import ModelProvider
+from apps.inference.models import (
+    AIBudgetPolicy,
+    BudgetReservation,
+    GenerationWorkItem,
+    ProjectAISettings,
+)
+from apps.inference.serializers import (
+    GenerationWorkItemSerializer,
+    ProjectAISettingsSerializer,
+)
+from apps.inference.services.pricing import PricingService
+from apps.inference.services.hybrid import HybridInferenceService
+from apps.inference.services.routing import NoRouteAvailable, RoutingService
+from apps.inference.services.segments import plan_video_segments
+from apps.inference.services.stage_planner import StagePlanningError, StageWorkItemPlanner
+from apps.inference.services.work_items import (
+    InvalidWorkItemTransition,
+    WorkItemService,
+)
 from apps.prompts.models import PromptTemplate, PromptTemplateSet
 from apps.prompts.models import GlobalVariable
 from apps.prompts.serializers import GlobalVariableListSerializer
 from core.ai_client.factory import create_ai_client
+from core.ai_client.base import AIResponse
 from core.utils.file_storage import image_storage
 from .models import Project, ProjectAssetBinding, ProjectModelConfig, ProjectStage, Series
+from .paid_safety import pipeline_direct_api_providers
 from .queue_service import cancel_running_queue_task, enqueue_episode_task, force_release_queue_task
 from .serializers import (
     ProjectBatchCreateSerializer,
@@ -55,6 +80,8 @@ from .serializers import (
     StageRetrySerializer,
 )
 from .utils import get_project_stage_order, get_stage_template_states, is_stage_template_enabled
+
+logger = logging.getLogger(__name__)
 
 
 class SeriesViewSet(viewsets.ModelViewSet):
@@ -126,6 +153,497 @@ class ProjectViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(series_id=series_id)
 
         return queryset
+
+    @action(detail=True, methods=['get', 'put', 'patch'], url_path='ai-settings')
+    def ai_settings(self, request, pk=None):
+        """读取或更新项目质量、出站授权和预算。
+
+        云授权是项目级显式决定。第一次从禁止切换为允许时必须附带确认位；
+        撤销授权会同步关闭自动付费回退，防止旧配置继续向外发送数据。
+        """
+
+        project = self.get_object()
+        ai_settings, _ = ProjectAISettings.objects.get_or_create(project=project)
+        if request.method.lower() == 'get':
+            return Response(ProjectAISettingsSerializer(ai_settings).data)
+
+        partial = request.method.lower() == 'patch'
+        serializer = ProjectAISettingsSerializer(
+            ai_settings,
+            data=request.data,
+            partial=partial,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+        requested_cloud = serializer.validated_data.get(
+            'allow_cloud_data_transfer', ai_settings.allow_cloud_data_transfer
+        )
+        if requested_cloud and not ai_settings.allow_cloud_data_transfer:
+            if request.data.get('confirm_cloud_data_transfer') is not True:
+                return Response(
+                    {
+                        'error': {
+                            'code': 'CLOUD_AUTH_CONFIRMATION_REQUIRED',
+                            'message': '首次授权云端出站必须明确确认。',
+                        }
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        with transaction.atomic():
+            saved = serializer.save()
+            if requested_cloud:
+                if not saved.cloud_authorized_by_id:
+                    saved.cloud_authorized_by = request.user
+                    saved.cloud_authorized_at = timezone.now()
+            else:
+                saved.allow_paid_fallback = False
+                saved.cloud_authorized_by = None
+                saved.cloud_authorized_at = None
+            saved.save(
+                update_fields=[
+                    'allow_paid_fallback', 'cloud_authorized_by',
+                    'cloud_authorized_at', 'updated_at',
+                ]
+            )
+        return Response(ProjectAISettingsSerializer(saved).data)
+
+    @action(detail=True, methods=['post'], url_path='generation-estimates')
+    def generation_estimates(self, request, pk=None):
+        """执行前返回工作项规模、最坏付费成本与缺失门槛。"""
+
+        project = self.get_object()
+        capability = str(request.data.get('capability') or '').strip()
+        if capability not in {'llm', 'text2image', 'image_edit', 'image2video', 'motion_render'}:
+            return Response(
+                {'error': 'capability 不受支持'}, status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            task_count = int(request.data.get('task_count', 1))
+        except (TypeError, ValueError):
+            return Response({'error': 'task_count 必须是整数'}, status=status.HTTP_400_BAD_REQUEST)
+        if task_count < 1 or task_count > 10000:
+            return Response(
+                {'error': 'task_count 必须在 1 到 10000 之间'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ai_settings, _ = ProjectAISettings.objects.get_or_create(project=project)
+        profile_code = str(
+            request.data.get('profile') or ai_settings.default_profile_code or 'balanced'
+        )
+        stage_type = str(request.data.get('stage_type') or '')
+        provider_id = str(request.data.get('provider_id') or '').strip()
+        usage_per_item = request.data.get('usage_per_item') or {}
+        if not isinstance(usage_per_item, dict):
+            return Response(
+                {'error': 'usage_per_item 必须是对象'}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        segment_plan = []
+        effective_task_count = task_count
+        if capability == 'image2video':
+            try:
+                duration = Decimal(str(request.data.get('duration_seconds', 10)))
+                native_max = Decimal(str(request.data.get('native_max_seconds', 5)))
+            except (InvalidOperation, TypeError, ValueError):
+                return Response(
+                    {'error': '视频时长参数必须是数字'}, status=status.HTTP_400_BAD_REQUEST
+                )
+            try:
+                segment_plan = plan_video_segments(
+                    target_duration_seconds=duration,
+                    max_native_duration=native_max,
+                    fps=int(request.data.get('fps', 24)),
+                    overlap_frames=int(request.data.get('overlap_frames', 8)),
+                )
+            except (ValueError, TypeError) as error:
+                return Response({'error': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+            effective_task_count *= len(segment_plan)
+            usage_per_item = {
+                'video_seconds': float(native_max),
+                'video_tasks': 1,
+                **usage_per_item,
+            }
+
+        missing = []
+        paid_targets = []
+        local_targets = []
+        explicit_provider = None
+        if provider_id:
+            explicit_provider = ModelProvider.objects.filter(
+                pk=provider_id,
+                provider_type=capability,
+                is_active=True,
+            ).first()
+            if explicit_provider is None:
+                return Response(
+                    {'error': '显式 Provider 不存在、未启用或能力不匹配'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if explicit_provider.deployment_mode == 'api':
+                paid_targets.append(explicit_provider)
+            else:
+                local_targets.append(explicit_provider)
+        else:
+            try:
+                selection = RoutingService.select(
+                    capability,
+                    context={
+                        'project_id': str(project.id),
+                        'stage_type': stage_type,
+                        'profile_code': profile_code,
+                    },
+                    project_settings=ai_settings,
+                )
+                route = selection.route
+            except NoRouteAvailable:
+                route = None
+                missing.append('generation_route')
+
+            if route is not None:
+                for target in route.targets.filter(is_active=True).select_related('provider'):
+                    provider = target.provider
+                    if provider and provider.deployment_mode == 'api':
+                        paid_targets.append(target)
+                    else:
+                        local_targets.append(target)
+
+        # 自动回退最多走两个付费目标；最坏成本按顺序累加，不能只报最低价。
+        worst_per_item = Decimal('0')
+        price_details = []
+        for target in paid_targets[:2]:
+            provider = target if isinstance(target, ModelProvider) else target.provider
+            estimate = PricingService.estimate(
+                capability,
+                provider.model_name,
+                usage_per_item,
+                provider=provider,
+                context={'profile': profile_code, 'stage_type': stage_type},
+            )
+            if not estimate.is_complete:
+                missing.append(f'price:{provider.id}')
+            else:
+                worst_per_item += estimate.amount_cny
+            price_details.append({
+                'provider_id': str(provider.id),
+                'provider_name': provider.name,
+                'amount_cny': estimate.amount_cny,
+                'complete': estimate.is_complete,
+                'missing_usage': estimate.missing_usage,
+                'rate_ids': [str(line.rate_id) for line in estimate.lines],
+            })
+
+        policy = ai_settings.budget_policy or AIBudgetPolicy.objects.filter(
+            is_active=True
+        ).order_by('created_at').first()
+        if not ai_settings.allow_cloud_data_transfer:
+            missing.append('cloud_authorization')
+        if ai_settings.project_budget_cny <= 0:
+            missing.append('project_budget')
+        if not policy or policy.daily_limit_cny <= 0:
+            missing.append('global_daily_budget')
+        if not policy or policy.monthly_limit_cny <= 0:
+            missing.append('global_monthly_budget')
+        if paid_targets and not provider_id and not ai_settings.allow_paid_fallback:
+            missing.append('paid_fallback_disabled')
+
+        return Response({
+            'project_id': str(project.id),
+            'capability': capability,
+            'stage_type': stage_type,
+            'profile': profile_code,
+            'estimate_scope': 'explicit_provider' if provider_id else 'route',
+            'provider_id': str(explicit_provider.pk) if explicit_provider else None,
+            'requested_task_count': task_count,
+            'effective_work_item_count': effective_task_count,
+            'local_target_count': len(local_targets),
+            'paid_target_count': len(paid_targets),
+            'worst_api_cost_cny': worst_per_item * effective_task_count,
+            'currency': 'CNY',
+            'price_details': price_details,
+            'missing_configuration': list(dict.fromkeys(missing)),
+            # 显式 Provider 属于一次性人工付费，不得在 UI/审计中伪装成自动回退。
+            'automatic_fallback_allowed': (
+                not provider_id and not missing and bool(paid_targets)
+            ),
+            'manual_paid_execution_allowed': (
+                bool(provider_id and paid_targets) and not missing
+            ),
+            'segment_plan': segment_plan,
+        })
+
+    @action(detail=True, methods=['get'], url_path='generation-work-items')
+    def generation_work_items(self, request, pk=None):
+        project = self.get_object()
+        queryset = GenerationWorkItem.objects.filter(project=project).select_related(
+            'profile', 'route', 'target', 'provider', 'runtime_node'
+        ).prefetch_related('artifacts')
+        for field in ('status', 'capability', 'stage_type'):
+            value = request.query_params.get(field)
+            if value:
+                queryset = queryset.filter(**{field: value})
+        queryset = queryset.order_by('-priority', 'scheduled_at', 'created_at')
+        page = self.paginate_queryset(queryset)
+        serializer = GenerationWorkItemSerializer(page or queryset, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='retry-failed-items')
+    def retry_failed_items(self, request, pk=None):
+        """只补跑失败项；失败终态保留原审计记录，重试创建新的幂等工作项。"""
+
+        project = self.get_object()
+        selected_ids = request.data.get('work_item_ids') or []
+        if selected_ids and not isinstance(selected_ids, list):
+            return Response(
+                {'error': 'work_item_ids 必须是数组'}, status=status.HTTP_400_BAD_REQUEST
+            )
+        queryset = GenerationWorkItem.objects.filter(
+            project=project, status__in=['failed', 'retry_wait']
+        )
+        if selected_ids:
+            queryset = queryset.filter(id__in=selected_ids)
+        retried_ids = []
+        with transaction.atomic():
+            # 工作项与预算预留分别加锁，避免人工复核状态在“检查通过”和创建
+            # 新幂等键之间发生变化。这里不 select_related nullable 关系。
+            items = list(queryset.select_for_update()[:1000])
+            reservation_statuses = {}
+            reservations = BudgetReservation.objects.select_for_update().filter(
+                work_item_id__in=[item.pk for item in items]
+            ).values_list('work_item_id', 'status')
+            for work_item_id, reservation_status in reservations:
+                reservation_statuses.setdefault(work_item_id, []).append(reservation_status)
+            blocked_items = [
+                item for item in items
+                if WorkItemService.requires_paid_manual_review(
+                    item,
+                    reservation_statuses.get(item.pk, []),
+                )
+            ]
+            if blocked_items:
+                return Response(
+                    {
+                        'error': {
+                            'code': 'PAID_MANUAL_REVIEW_REQUIRED',
+                            'message': '存在付费结果未完成核对的工作项，请先在预算预留中人工结算或释放。',
+                            'work_item_ids': [str(item.pk) for item in blocked_items],
+                        }
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            for item in items:
+                if item.status == 'retry_wait':
+                    try:
+                        new_item = WorkItemService.retry(item, force=True)
+                    except InvalidWorkItemTransition:
+                        continue
+                else:
+                    retry_key = f'{item.idempotency_key}:manual:{uuid.uuid4().hex}'
+                    new_item = WorkItemService.create(
+                        project=project,
+                        capability=item.capability,
+                        idempotency_key=retry_key,
+                        stage_type=item.stage_type,
+                        storyboard_id=item.storyboard_id,
+                        tile_index=item.tile_index,
+                        segment_index=item.segment_index,
+                        profile=item.profile,
+                        route=item.route,
+                        target=item.target,
+                        provider=item.provider,
+                        runtime_node=item.runtime_node,
+                        priority=item.priority,
+                        request_parameters=item.request_parameters,
+                        effective_parameters=item.effective_parameters,
+                        route_snapshot={
+                            **(item.route_snapshot or {}),
+                            'manual_retry_of': str(item.id),
+                        },
+                        max_attempts=item.max_attempts,
+                    )
+                retried_ids.append(str(new_item.id))
+
+            if retried_ids:
+                def dispatch_items():
+                    try:
+                        from apps.inference.tasks import enqueue_work_item
+                        for item_id in retried_ids:
+                            enqueue_work_item.apply_async(
+                                args=[item_id], queue='orchestration'
+                            )
+                    except Exception:
+                        # 数据库中的 waiting 状态可由 reconciler 恢复，不能因 Redis
+                        # 暂时不可用而回滚用户已经确认的重试意图。
+                        return
+                transaction.on_commit(dispatch_items)
+
+        return Response(
+            {'retried_count': len(retried_ids), 'work_item_ids': retried_ids},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    @action(detail=True, methods=['post'], url_path='regenerate-work-item-with-api')
+    def regenerate_work_item_with_api(self, request, pk=None):
+        """主观质量不满意时，显式创建一次受三重门保护的 API 重生成。
+
+        该入口不把“审美不满意”伪装成技术失败，也不修改原工作项。用户必须
+        先看到精确 Provider 的最坏估算并确认费用；真正执行前 PaidCallGate 会
+        再次锁定价目表与预算，价格变化超过确认上限时任务会被安全拒绝。
+        """
+
+        project = self.get_object()
+        source = GenerationWorkItem.objects.filter(
+            pk=request.data.get('work_item_id'),
+            project=project,
+            status__in=['succeeded', 'failed'],
+        ).select_related('profile').first()
+        if source is None:
+            return Response(
+                {'error': {'code': 'INPUT_MISSING', 'message': '源工作项不存在或尚未终态。'}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if WorkItemService.requires_paid_manual_review(source):
+            return Response(
+                {
+                    'error': {
+                        'code': 'PAID_MANUAL_REVIEW_REQUIRED',
+                        'message': '源工作项仍有付费结果待人工核对，禁止再次提交。',
+                    }
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        provider = ModelProvider.objects.filter(
+            pk=request.data.get('provider_id'),
+            provider_type=source.capability,
+            deployment_mode='api',
+            is_active=True,
+        ).first()
+        if provider is None:
+            return Response(
+                {'error': {'code': 'INVALID_REQUEST', 'message': '请选择能力匹配的 API Provider。'}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if request.data.get('confirm_paid_generation') is not True:
+            return Response(
+                {
+                    'error': {
+                        'code': 'PAID_CONFIRMATION_REQUIRED',
+                        'message': '请先查看最大预计费用并显式确认本次 API 重生成。',
+                        'provider_id': str(provider.pk),
+                    }
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ai_settings = ProjectAISettings.objects.filter(project=project, is_active=True).first()
+        if not ai_settings or not (
+            ai_settings.allow_cloud_data_transfer
+            and ai_settings.cloud_authorized_by_id
+            and ai_settings.cloud_authorized_at
+        ):
+            return Response(
+                {'error': {'code': 'CLOUD_NOT_AUTHORIZED', 'message': '项目未授权数据出站。'}},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        usage = (source.request_parameters or {}).get('usage_estimate') or source.usage or {}
+        estimate = PricingService.estimate(
+            source.capability,
+            provider.model_name,
+            usage,
+            provider=provider,
+            context={
+                'profile': getattr(source.profile, 'key', ai_settings.default_profile_code),
+                'stage_type': source.stage_type,
+            },
+        )
+        if not estimate.is_complete:
+            return Response(
+                {'error': {'code': 'PRICE_MISSING', 'message': '缺少匹配本次用量的有效价目表。'}},
+                status=status.HTTP_409_CONFLICT,
+            )
+        try:
+            confirmed_max = Decimal(str(request.data.get('confirmed_max_cost_cny')))
+        except (InvalidOperation, TypeError, ValueError):
+            return Response(
+                {'error': {'code': 'BUDGET_DENIED', 'message': '必须提交本次确认的最大费用。'}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if confirmed_max < estimate.amount_cny:
+            return Response(
+                {
+                    'error': {
+                        'code': 'BUDGET_DENIED',
+                        'message': '确认金额低于当前价目表的最坏估算。',
+                    }
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        client_key = str(request.headers.get('Idempotency-Key') or '').strip()
+        if not client_key or len(client_key) > 200:
+            return Response(
+                {'error': {'code': 'INVALID_IDEMPOTENCY_KEY', 'message': '必须提供 1–200 字符的 Idempotency-Key。'}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        key_material = f'{source.pk}:{provider.pk}:{client_key}'
+        work_key = f'api-regenerate:{hashlib.sha256(key_material.encode()).hexdigest()}'
+        request_parameters = {
+            **(source.request_parameters or {}),
+            'manual_api': True,
+            'confirmed_max_cost_cny': str(confirmed_max),
+            'usage_estimate': usage,
+        }
+        with transaction.atomic():
+            existed = GenerationWorkItem.objects.filter(
+                project=project, idempotency_key=work_key
+            ).exists()
+            item = WorkItemService.create(
+                project=project,
+                capability=source.capability,
+                idempotency_key=work_key,
+                stage_execution_id=uuid.uuid4(),
+                stage_type=source.stage_type,
+                storyboard_id=source.storyboard_id,
+                tile_index=source.tile_index,
+                segment_index=source.segment_index,
+                profile=source.profile,
+                provider=provider,
+                priority=source.priority,
+                request_parameters=request_parameters,
+                effective_parameters={},
+                estimated_cost=estimate.amount_cny,
+                route_snapshot={
+                    'automatic_route': False,
+                    'manual_api_regenerate_of': str(source.pk),
+                    'confirmed_max_cost_cny': str(confirmed_max),
+                },
+                max_attempts=1,
+            )
+            item.depends_on.set(source.depends_on.all())
+            if not existed:
+                def dispatch_item():
+                    try:
+                        from apps.inference.tasks import enqueue_work_item
+                        enqueue_work_item.apply_async(
+                            args=[str(item.pk)], queue='orchestration'
+                        )
+                    except Exception:
+                        # waiting 是持久化事实；reconciler 会在 broker 恢复后补发。
+                        return
+                transaction.on_commit(dispatch_item)
+
+        return Response(
+            {
+                'work_item': GenerationWorkItemSerializer(item).data,
+                'maximum_estimated_cost_cny': estimate.amount_cny,
+                'idempotent_replay': existed,
+            },
+            status=status.HTTP_200_OK if existed else status.HTTP_202_ACCEPTED,
+        )
 
     def get_serializer_class(self):
         """根据动作选择序列化器"""
@@ -485,6 +1003,51 @@ class ProjectViewSet(viewsets.ModelViewSet):
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
+        try:
+            provider = self._get_node_chat_provider(project, node_type)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        paid_confirmed = request.data.get('confirm_paid') is True
+        if provider.deployment_mode == 'api' and not paid_confirmed:
+            return Response(
+                {
+                    'error': {
+                        'code': 'PAID_CONFIRMATION_REQUIRED',
+                        'message': '节点对话当前选择付费 API；请先查看估算并显式确认本次付费调用。',
+                        'provider_id': str(provider.pk),
+                        'capability': 'llm',
+                        'stage_type': f'{node_type}_chat',
+                        'usage_per_item': {
+                            'request_count': 1,
+                            'input_tokens': max(1, len(user_message)),
+                            'output_tokens': int(getattr(provider, 'max_tokens', 2000) or 2000),
+                        },
+                    }
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        confirmed_max_cost = None
+        if provider.deployment_mode == 'api':
+            try:
+                confirmed_max_cost = Decimal(
+                    str(request.data.get('confirmed_max_cost_cny'))
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                return Response(
+                    {
+                        'error': {
+                            'code': 'BUDGET_DENIED',
+                            'message': '必须提交本次确认的最大费用。',
+                        }
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if confirmed_max_cost < 0:
+                return Response(
+                    {'error': {'code': 'BUDGET_DENIED', 'message': '确认费用不能小于 0。'}},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         stream_token = uuid.uuid4().hex
         cache.set(
             f'project_node_chat_stream:{stream_token}',
@@ -496,6 +1059,11 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 'user_message': user_message,
                 'messages': messages,
                 'node_payload': node_payload,
+                'provider_id': str(provider.id),
+                'paid_confirmed': paid_confirmed,
+                'confirmed_max_cost_cny': (
+                    str(confirmed_max_cost) if confirmed_max_cost is not None else None
+                ),
             },
             timeout=300,
         )
@@ -533,46 +1101,95 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 user_message = stream_payload.get('user_message') or ''
                 messages = stream_payload.get('messages') or []
                 _, node_payload = self._resolve_node_chat_target(project, node_type, node_id)
-                provider = self._get_node_chat_provider(project, node_type)
-                ai_client = create_ai_client(provider)
+                provider = ModelProvider.objects.filter(
+                    id=stream_payload.get('provider_id'), is_active=True
+                ).first()
+                if not provider:
+                    raise ValueError('节点对话模型已停用或不存在')
+                paid_confirmed = stream_payload.get('paid_confirmed') is True
+                if provider.deployment_mode == 'api' and not paid_confirmed:
+                    raise ValueError('PAID_CONFIRMATION_REQUIRED: 未确认本次节点对话付费调用')
                 system_prompt = self._render_node_chat_system_prompt(project, node_type, node_payload)
                 prompt = self._build_node_chat_user_prompt(node_type, node_payload, messages, user_message)
-                max_tokens = getattr(provider, 'max_tokens', None) or ai_client.config.get('max_tokens', 2000)
+                max_tokens = getattr(provider, 'max_tokens', None) or 2000
                 temperature = getattr(provider, 'temperature', None)
                 if temperature is None:
-                    temperature = ai_client.config.get('temperature', 0.7)
+                    temperature = 0.7
 
                 yield f"data: {json.dumps({'type': 'connected'}, ensure_ascii=False)}\n\n"
 
-                final_text = ''
-                for event in ai_client.generate_stream(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                ):
+                captured_events = []
+
+                def invoke(selected_provider, parameters, _repaired_structure):
+                    # SSE 入口不能在三重门外先创建客户端。与阶段流式处理一致，
+                    # Hybrid 内完整消费流，再回放 token，确保预算预留先于外呼。
+                    ai_client = create_ai_client(selected_provider)
+                    final_text = ''
+                    metadata = {}
+                    for event in ai_client.generate_stream(
+                        prompt=parameters['prompt'],
+                        system_prompt=parameters.get('system_prompt', ''),
+                        max_tokens=parameters.get('max_tokens', selected_provider.max_tokens),
+                        temperature=parameters.get('temperature', selected_provider.temperature),
+                    ):
+                        captured_events.append(event)
+                        event_type = event.get('type')
+                        if event_type == 'token':
+                            final_text = event.get('full_text') or final_text + event.get('content', '')
+                        elif event_type == 'done':
+                            final_text = event.get('full_text') or final_text
+                            metadata = event.get('metadata') or metadata
+                        elif event_type == 'error':
+                            raise RuntimeError(event.get('error') or '节点对话生成失败')
+                    # JSON 契约也在结算前校验；解析失败不能伪装成成功结果。
+                    try:
+                        self._extract_node_chat_result(final_text, node_type, node_payload)
+                    except ValueError as exc:
+                        exc.code = 'OUTPUT_SCHEMA_INVALID'
+                        raise
+                    return AIResponse(success=True, text=final_text, metadata=metadata)
+
+                execution = HybridInferenceService.execute(
+                    project=project,
+                    capability='llm',
+                    stage_type=f'{node_type}_chat',
+                    explicit_provider=provider,
+                    manual_api=provider.deployment_mode == 'api' and paid_confirmed,
+                    request_parameters={
+                        'prompt': prompt,
+                        'system_prompt': system_prompt,
+                        'max_tokens': max_tokens,
+                        'temperature': temperature,
+                        'output_spec': {'format': 'json'},
+                        'confirmed_max_cost_cny': stream_payload.get(
+                            'confirmed_max_cost_cny'
+                        ),
+                    },
+                    usage_estimate={
+                        'request_count': 1,
+                        'input_tokens': max(1, len(prompt) + len(system_prompt)),
+                        'output_tokens': max_tokens,
+                    },
+                    invoke=invoke,
+                )
+                final_text = execution.value.text
+                for event in captured_events:
                     if event.get('type') == 'token':
-                        final_text = event.get('full_text') or final_text
                         payload = {
                             'type': 'token',
                             'content': event.get('content', ''),
-                            'full_text': final_text,
+                            'full_text': event.get('full_text') or final_text,
                         }
                         yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    elif event.get('type') == 'done':
-                        final_text = event.get('full_text') or final_text
-                        result = self._extract_node_chat_result(final_text, node_type, node_payload)
-                        payload = {
-                            'type': 'done',
-                            'reply_text': result['reply_text'],
-                            'apply_patch': result['apply_patch'],
-                            'raw_text': final_text,
-                            'metadata': event.get('metadata') or {},
-                        }
-                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    elif event.get('type') == 'error':
-                        payload = {'type': 'error', 'error': event.get('error') or '节点对话生成失败'}
-                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                result = self._extract_node_chat_result(final_text, node_type, node_payload)
+                payload = {
+                    'type': 'done',
+                    'reply_text': result['reply_text'],
+                    'apply_patch': result['apply_patch'],
+                    'raw_text': final_text,
+                    'metadata': execution.value.metadata or {},
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             except Exception as exc:
                 payload = json.dumps({'type': 'error', 'error': str(exc)}, ensure_ascii=False)
                 yield f'data: {payload}\n\n'
@@ -695,16 +1312,32 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return f"project_active_tasks:{project_id}"
 
     def _get_project_task_ids(self, project_id):
-        return cache.get(self._project_task_cache_key(project_id), [])
+        try:
+            return cache.get(self._project_task_cache_key(project_id), [])
+        except Exception as error:
+            # 这里的缓存只用于批量取消的辅助索引，不是任务是否已入队的事实源。
+            # Redis 短暂不可用不能把已经由 Celery 接受的任务误报为 HTTP 500。
+            logger.warning('读取项目任务辅助缓存失败: %s', error)
+            return []
 
     def _register_project_task(self, project_id, task_id):
         task_ids = self._get_project_task_ids(project_id)
         if task_id not in task_ids:
             task_ids.append(task_id)
-        cache.set(self._project_task_cache_key(project_id), task_ids, timeout=24 * 60 * 60)
+        try:
+            cache.set(
+                self._project_task_cache_key(project_id),
+                task_ids,
+                timeout=24 * 60 * 60,
+            )
+        except Exception as error:
+            logger.warning('写入项目任务辅助缓存失败: %s', error)
 
     def _clear_project_tasks(self, project_id):
-        cache.delete(self._project_task_cache_key(project_id))
+        try:
+            cache.delete(self._project_task_cache_key(project_id))
+        except Exception as error:
+            logger.warning('清理项目任务辅助缓存失败: %s', error)
 
     def _start_pipeline_directly(self, project):
         from apps.projects.tasks import run_full_pipeline_task
@@ -1128,8 +1761,241 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_200_OK,
             )
 
+        explicit_provider_id = (
+            request.data.get('explicit_provider_id')
+            or input_data.get('explicit_provider_id')
+        )
+        manual_api = bool(request.data.get('manual_api') or input_data.get('manual_api'))
+        if explicit_provider_id or manual_api:
+            return self._execute_manual_api_stage(
+                project=project,
+                stage_name=stage_name,
+                input_data=input_data,
+                provider_id=explicit_provider_id,
+                confirmed=(
+                    request.data.get('confirm_paid_generation') is True
+                    or input_data.get('confirm_paid_generation') is True
+                ),
+                confirmed_max_cost_cny=(
+                    request.data.get('confirmed_max_cost_cny')
+                    or input_data.get('confirmed_max_cost_cny')
+                ),
+                idempotency_key=request.headers.get('Idempotency-Key', ''),
+            )
+
         # 模式2: Celery异步任务 (默认，推荐)
         return self._execute_stage_async(project, stage_name, input_data)
+
+    def _execute_manual_api_stage(
+        self,
+        *,
+        project,
+        stage_name,
+        input_data,
+        provider_id,
+        confirmed,
+        confirmed_max_cost_cny,
+        idempotency_key,
+    ):
+        """将一次明确 API 重生成原子规划为付费工作项。
+
+        先在同一数据库事务中生成完整工作项集合并汇总最坏费用；任一费率缺失
+        或总额超过本次确认值都会回滚整个计划，保证不会出现“只派发了一半”的
+        付费阶段。视频的最终 compose 项仍自动走本地 motion_render 路由。
+        """
+
+        if not getattr(settings, 'AI_ROUTER_V2_ENABLED', False):
+            return Response(
+                {
+                    'error': {
+                        'code': 'ROUTER_DISABLED',
+                        'message': '显式 API 阶段重生成仅在 AI_ROUTER_V2_ENABLED 开启后可用。',
+                    }
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        capability_by_stage = {
+            'rewrite': 'llm',
+            'asset_extraction': 'llm',
+            'storyboard': 'llm',
+            'camera_movement': 'llm',
+            'image_generation': 'text2image',
+            'image_edit': 'image_edit',
+            'video_generation': 'image2video',
+        }
+        capability = capability_by_stage.get(stage_name)
+        provider = ModelProvider.objects.filter(
+            pk=provider_id,
+            provider_type=capability,
+            deployment_mode='api',
+            is_active=True,
+        ).first()
+        if provider is None:
+            return Response(
+                {'error': {'code': 'INVALID_REQUEST', 'message': '显式 API Provider 不存在或能力不匹配。'}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not confirmed:
+            return Response(
+                {
+                    'error': {
+                        'code': 'PAID_CONFIRMATION_REQUIRED',
+                        'message': '请先查看最大预计费用并确认本次 API 阶段重生成。',
+                        'provider_id': str(provider.pk),
+                        'capability': capability,
+                        'stage_type': stage_name,
+                    }
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            confirmed_max = Decimal(str(confirmed_max_cost_cny))
+        except (InvalidOperation, TypeError, ValueError):
+            return Response(
+                {'error': {'code': 'BUDGET_DENIED', 'message': '必须提交本次确认的最大费用。'}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        client_key = str(idempotency_key or '').strip()
+        if not client_key or len(client_key) > 200:
+            return Response(
+                {'error': {'code': 'INVALID_IDEMPOTENCY_KEY', 'message': '必须提供 1–200 字符的 Idempotency-Key。'}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        ai_settings = ProjectAISettings.objects.filter(project=project, is_active=True).first()
+        policy = getattr(ai_settings, 'budget_policy', None) or AIBudgetPolicy.objects.filter(
+            is_active=True
+        ).order_by('created_at').first()
+        if not ai_settings or not (
+            ai_settings.allow_cloud_data_transfer
+            and ai_settings.cloud_authorized_by_id
+            and ai_settings.cloud_authorized_at
+        ):
+            return Response(
+                {'error': {'code': 'CLOUD_NOT_AUTHORIZED', 'message': '项目未授权数据出站。'}},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if (
+            ai_settings.project_budget_cny <= 0
+            or policy is None
+            or policy.daily_limit_cny <= 0
+            or policy.monthly_limit_cny <= 0
+        ):
+            return Response(
+                {'error': {'code': 'BUDGET_DENIED', 'message': '项目或全局预算仍为 0。'}},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        execution_material = f'{project.pk}:{stage_name}:{provider.pk}:{client_key}'
+        execution_id = uuid.uuid5(uuid.NAMESPACE_URL, execution_material)
+        storyboard_ids = input_data.get('storyboard_ids')
+        runtime_overrides = {
+            key: value for key, value in input_data.items()
+            if key not in {
+                'storyboard_ids', 'force_regenerate', 'manual_api',
+                'explicit_provider_id', 'confirm_paid_generation',
+                'confirmed_max_cost_cny',
+            }
+        }
+        try:
+            with transaction.atomic():
+                plan = StageWorkItemPlanner.plan_stage(
+                    project=project,
+                    stage_type=stage_name,
+                    storyboard_ids=storyboard_ids,
+                    force_regenerate=bool(input_data.get('force_regenerate', True)),
+                    runtime_overrides=runtime_overrides,
+                    stage_execution_id=execution_id,
+                    enqueue=False,
+                    explicit_provider=provider,
+                    manual_api=True,
+                )
+                total = Decimal('0')
+                paid_items = []
+                for item in plan.work_items:
+                    if item.provider_id != provider.pk:
+                        continue
+                    usage = (item.request_parameters or {}).get('usage_estimate') or {}
+                    estimate = PricingService.estimate(
+                        item.capability,
+                        provider.model_name,
+                        usage,
+                        provider=provider,
+                        context={
+                            'profile': getattr(item.profile, 'key', ai_settings.default_profile_code),
+                            'stage_type': item.stage_type,
+                        },
+                    )
+                    if not estimate.is_complete:
+                        raise StagePlanningError(
+                            f'PRICE_MISSING:{item.pk}:缺少匹配工作项用量的有效价目表'
+                        )
+                    total += estimate.amount_cny
+                    paid_items.append((item, estimate.amount_cny))
+                if not paid_items:
+                    raise StagePlanningError('INVALID_REQUEST:阶段没有可由该 API Provider 执行的工作项')
+                if total > confirmed_max:
+                    raise StagePlanningError(
+                        f'BUDGET_DENIED:当前最坏估算 {total} CNY 超过确认上限 {confirmed_max} CNY'
+                    )
+                for item, item_cost in paid_items:
+                    item.request_parameters = {
+                        **(item.request_parameters or {}),
+                        'manual_api': True,
+                        # 每个工作项只可消费自己的估算份额；总额已在本事务中校验。
+                        'confirmed_max_cost_cny': str(item_cost),
+                    }
+                    item.estimated_cost = item_cost
+                    item.max_attempts = 1
+                    item.route_snapshot = {
+                        **(item.route_snapshot or {}),
+                        'manual_api_stage': True,
+                        'confirmed_stage_max_cost_cny': str(confirmed_max),
+                        'estimated_stage_cost_cny': str(total),
+                    }
+                    item.save(update_fields=[
+                        'request_parameters', 'estimated_cost', 'max_attempts',
+                        'route_snapshot', 'updated_at',
+                    ])
+
+                root_ids = [
+                    str(item.pk) for item in plan.work_items if not item.depends_on.exists()
+                ]
+                def dispatch_items():
+                    try:
+                        from apps.inference.tasks import enqueue_work_item
+                        for item_id in root_ids:
+                            enqueue_work_item.apply_async(
+                                args=[item_id], queue='orchestration'
+                            )
+                    except Exception:
+                        return
+                transaction.on_commit(dispatch_items)
+        except StagePlanningError as error:
+            raw = str(error)
+            code, _, message = raw.partition(':')
+            known = {'PRICE_MISSING', 'BUDGET_DENIED', 'INVALID_REQUEST'}
+            return Response(
+                {
+                    'error': {
+                        'code': code if code in known else 'INVALID_REQUEST',
+                        'message': message or raw,
+                    }
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        return Response(
+            {
+                'stage': stage_name,
+                'stage_execution_id': str(plan.stage_execution_id),
+                'work_item_ids': [str(item.pk) for item in plan.work_items],
+                'paid_work_item_count': len(paid_items),
+                'maximum_estimated_cost_cny': total,
+                'idempotent_replay': plan.created_count == 0,
+                'message': '已创建受费用上限保护的 API 重生成工作项。',
+            },
+            status=status.HTTP_200_OK if plan.created_count == 0 else status.HTTP_202_ACCEPTED,
+        )
 
     def _execute_stage_async(self, project, stage_name, input_data):
         """
@@ -1217,6 +2083,10 @@ class ProjectViewSet(viewsets.ModelViewSet):
             },
             status=status.HTTP_202_ACCEPTED,
         )
+
+    @staticmethod
+    def _pipeline_direct_api_providers(project):
+        return pipeline_direct_api_providers(project)
 
     @action(detail=True, methods=['post'])
     def apply_asset_extraction(self, request, pk=None):
@@ -1362,27 +2232,96 @@ class ProjectViewSet(viewsets.ModelViewSet):
         if not provider:
             return Response({'error': '未配置可用的文生图模型'}, status=status.HTTP_400_BAD_REQUEST)
 
-        client = create_ai_client(provider)
+        paid_confirmed = request.data.get('confirm_paid') is True
+        if provider.deployment_mode == 'api' and not paid_confirmed:
+            return Response(
+                {
+                    'error': {
+                        'code': 'PAID_CONFIRMATION_REQUIRED',
+                        'message': '图片预览当前选择付费 API；请先查看估算并显式确认本次付费调用。',
+                        'provider_id': str(provider.pk),
+                        'capability': 'text2image',
+                        'stage_type': 'asset_extraction_preview',
+                        'usage_per_item': {
+                            'request_count': 1,
+                            'image_count': 1,
+                        },
+                    }
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        confirmed_max_cost = None
+        if provider.deployment_mode == 'api':
+            try:
+                confirmed_max_cost = Decimal(
+                    str(request.data.get('confirmed_max_cost_cny'))
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                return Response(
+                    {'error': {'code': 'BUDGET_DENIED', 'message': '必须提交本次确认的最大费用。'}},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         width = int(provider.extra_config.get('width', 1024)) if provider.extra_config else 1024
         height = int(provider.extra_config.get('height', 1024)) if provider.extra_config else 1024
 
-        response = client.generate(
-            api_url=provider.api_url,
-            session_id=provider.api_key,
-            model=provider.model_name,
-            prompt=prompt,
-            ratio='1:1',
-            resolution='2k',
-            width=width,
-            height=height,
-        )
+        request_parameters = {
+            'prompt': prompt,
+            'ratio': '1:1',
+            'resolution': '2k',
+            'width': width,
+            'height': height,
+            'output_spec': {'width': width, 'height': height, 'sample_count': 1},
+            'confirmed_max_cost_cny': (
+                str(confirmed_max_cost) if confirmed_max_cost is not None else None
+            ),
+        }
 
-        images = response.data if hasattr(response, 'data') else None
+        def invoke(selected_provider, parameters, _repaired_structure):
+            client = create_ai_client(selected_provider)
+            return client.generate(
+                api_url=selected_provider.api_url,
+                session_id=selected_provider.api_key,
+                model=selected_provider.model_name,
+                prompt=parameters['prompt'],
+                ratio=parameters['ratio'],
+                resolution=parameters['resolution'],
+                width=parameters['width'],
+                height=parameters['height'],
+            )
+
+        try:
+            execution = HybridInferenceService.execute(
+                project=project,
+                capability='text2image',
+                stage_type='asset_extraction_preview',
+                explicit_provider=provider,
+                manual_api=provider.deployment_mode == 'api' and paid_confirmed,
+                request_parameters=request_parameters,
+                usage_estimate={
+                    'request_count': 1,
+                    'image_count': 1,
+                    'width': width,
+                    'height': height,
+                },
+                invoke=invoke,
+            )
+            response = execution.value
+        except Exception as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if isinstance(response, dict):
+            images = response.get('data')
+            response_success = response.get('success', bool(images))
+            response_error = response.get('error')
+        else:
+            images = getattr(response, 'data', None)
+            response_success = getattr(response, 'success', bool(images))
+            response_error = getattr(response, 'error', None)
         if isinstance(images, dict):
             images = [images]
-        if not response or not getattr(response, 'success', False) or not isinstance(images, list) or not images:
+        if not response or not response_success or not isinstance(images, list) or not images:
             return Response(
-                {'error': getattr(response, 'error', None) or '文生图生成失败'},
+                {'error': response_error or '文生图生成失败'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -2061,6 +3000,22 @@ class ProjectViewSet(viewsets.ModelViewSet):
         POST /api/v1/projects/{id}/run_pipeline/
         """
         project = self.get_object()
+
+        direct_api_providers = list(self._pipeline_direct_api_providers(project))
+        if direct_api_providers:
+            return Response(
+                {
+                    'error': {
+                        'code': 'PAID_PIPELINE_CONFIRMATION_REQUIRED',
+                        'message': '完整流水线包含直接 API Provider，当前无法可靠聚合最大费用；请逐阶段确认执行。',
+                        'providers': [
+                            {'id': str(provider.pk), 'name': provider.name}
+                            for provider in direct_api_providers
+                        ],
+                    }
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
         if not project.series_id:
             return self._start_pipeline_directly(project)

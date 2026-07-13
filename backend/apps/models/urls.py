@@ -10,4 +10,6 @@ router.register(r'usage-logs', ModelUsageLogViewSet, basename='usage-log')
 
 urlpatterns = [
     path('', include(router.urls)),
+    # 推理控制面与旧 Provider API 共用 /models 前缀，便于一个管理页统一展示。
+    path('', include('apps.inference.urls')),
 ]

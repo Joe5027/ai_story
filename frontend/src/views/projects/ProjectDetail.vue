@@ -10,6 +10,7 @@
           :stages="stages"
           :model-config="modelConfig"
           :episodes="seriesEpisodes"
+          :before-run-pipeline="confirmPipelineRun"
           @execute-stage="handleExecuteStage"
           @save-stage="handleSaveStage"
           @generate-image="handleGenerateImage"
@@ -38,6 +39,9 @@ import { formatDate } from '@/utils/helpers';
 import { createProjectAllStagesSSE, createProjectStageSSE } from '@/services/sseService';
 import { buildProjectDetailAgentContext } from '@/services/pageAgent/contextBuilders';
 import { pageAgentActionRegistry } from '@/services/pageAgent/actionRegistry';
+import { modelProviderApi } from '@/api/models';
+import { promptTemplateAPI } from '@/api/prompts';
+import { confirmPaidGeneration } from '@/services/paidGenerationGuard';
 
 export default {
   name: 'ProjectDetail',
@@ -65,6 +69,11 @@ export default {
       // 单阶段 SSE 客户端
       stageSSEClient: null,
       sseRecoveryEnabled: true,
+      providerDetailCache: {},
+      templateProviderIds: null,
+      // 网络超时或 5xx 可能发生在服务端已受理之后；同一次付费动作必须复用此键，
+      // 直到收到明确成功或确定未提交的 4xx，避免用户重试时产生重复付费工作项。
+      paidStageIdempotencyKeys: {},
     };
   },
   watch: {
@@ -258,6 +267,9 @@ export default {
       this.loading = true;
       try {
         const projectId = this.$route.params.id;
+        if (String(this.project?.id || '') !== String(projectId)) {
+          this.templateProviderIds = null;
+        }
         this.project = await this.fetchProject(projectId);
         this.stages = await this.fetchProjectStages(projectId);
         this.modelConfig = await this.fetchModelConfig(projectId);
@@ -431,13 +443,229 @@ export default {
       }
     },
 
+    getStageProviderField(stageType) {
+      const fields = {
+        rewrite: 'rewrite_providers',
+        asset_extraction: 'rewrite_providers',
+        storyboard: 'storyboard_providers',
+        image_generation: 'image_providers',
+        multi_grid_image: 'image_providers',
+        image_edit: 'image_providers',
+        camera_movement: 'camera_providers',
+        video_generation: 'video_providers',
+      };
+      return fields[stageType] || '';
+    },
+
+    getStageCapability(stageType) {
+      if (['rewrite', 'asset_extraction', 'storyboard', 'camera_movement'].includes(stageType)) {
+        return 'llm';
+      }
+      const capabilities = {
+        image_generation: 'text2image',
+        multi_grid_image: 'text2image',
+        image_edit: 'image_edit',
+        video_generation: 'image2video',
+      };
+      return capabilities[stageType] || '';
+    },
+
+    async resolveConfiguredStageProvider(stageType) {
+      const field = this.getStageProviderField(stageType);
+      let providerRef = this.modelConfig?.[field]?.[0];
+      if (!providerRef) {
+        const templateProviders = await this.loadTemplateProviderIds();
+        providerRef = templateProviders[stageType];
+      }
+      if (!providerRef) {
+        return null;
+      }
+      if (typeof providerRef === 'object') {
+        return providerRef;
+      }
+      if (this.providerDetailCache[providerRef]) {
+        return this.providerDetailCache[providerRef];
+      }
+      const provider = await modelProviderApi.getProvider(providerRef);
+      this.providerDetailCache[providerRef] = provider;
+      return provider;
+    },
+
+    async loadTemplateProviderIds() {
+      if (this.templateProviderIds) {
+        return this.templateProviderIds;
+      }
+      if (!this.project?.prompt_template_set) {
+        this.templateProviderIds = {};
+        return this.templateProviderIds;
+      }
+      const response = await promptTemplateAPI.getList({
+        template_set: this.project.prompt_template_set,
+        is_active: true,
+        page_size: 100,
+      });
+      const templates = response.results || response || [];
+      this.templateProviderIds = templates.reduce((result, template) => {
+        if (template.model_provider) {
+          result[template.stage_type] = template.model_provider;
+        }
+        return result;
+      }, {});
+      return this.templateProviderIds;
+    },
+
+    getStageUsageEstimate(capability, inputData = {}, stageType = '') {
+      const storyboardScopedStages = new Set([
+        'camera_movement',
+        'image_generation',
+        'image_edit',
+        'video_generation',
+      ]);
+      const inferredStoryboardCount = storyboardScopedStages.has(stageType)
+        ? this.storyboards.length
+        : 1;
+      const taskCount = Math.max(
+        1,
+        inputData.storyboard_ids?.length
+          || inputData.scenes?.length
+          || inferredStoryboardCount
+      );
+      if (capability === 'llm') {
+        return {
+          taskCount,
+          usagePerItem: {
+            request_count: 1,
+            input_tokens: 16000,
+            output_tokens: 4000,
+          },
+        };
+      }
+      if (capability === 'image2video') {
+        return {
+          taskCount,
+          durationSeconds: 10,
+          // 具体秒数由估算接口按 5 秒原生分段展开，避免把 10 秒重复计入每个 segment。
+          usagePerItem: { request_count: 1, video_tasks: 1 },
+        };
+      }
+      return {
+        taskCount,
+        usagePerItem: { request_count: 1, image_count: 1 },
+      };
+    },
+
+    async confirmConfiguredPaidStage(stageType, inputData = {}) {
+      const provider = await this.resolveConfiguredStageProvider(stageType);
+      if (provider?.deployment_mode !== 'api') {
+        return { required: false, confirmed: false, provider: null };
+      }
+      const capability = this.getStageCapability(stageType);
+      if (!capability) {
+        await this.$alert(
+          '当前阶段使用 API Provider，但前端无法识别其计费能力，已阻止执行。',
+          '付费调用已阻止',
+          { tone: 'warning' }
+        );
+        return { required: true, confirmed: false, provider };
+      }
+      const usage = this.getStageUsageEstimate(capability, inputData, stageType);
+      const isManualRegeneration = Boolean(inputData.manual_api);
+      const paidConfirmation = await confirmPaidGeneration({
+        projectId: this.project.id,
+        capability,
+        stageType,
+        providerId: provider.id,
+        operationLabel: isManualRegeneration
+          ? `主观质量不满意，使用 ${provider.name} API 重生成`
+          : `使用 ${provider.name} API 执行${this.getStageDisplayName(stageType)}`,
+        confirm: this.$confirm,
+        alert: this.$alert,
+        ...usage,
+      });
+      return {
+        required: true,
+        confirmed: Boolean(paidConfirmation),
+        confirmedMaxCostCny: paidConfirmation?.maxCostCny || null,
+        provider,
+      };
+    },
+
+    async confirmPipelineRun() {
+      const templateProviders = await this.loadTemplateProviderIds();
+      const providerFields = [
+        'rewrite_providers',
+        'storyboard_providers',
+        'image_providers',
+        'camera_providers',
+        'video_providers',
+      ];
+      const providerIds = Array.from(new Set(
+        [
+          ...providerFields.flatMap((field) => this.modelConfig?.[field] || []),
+          ...Object.values(templateProviders),
+        ]
+          .map((provider) => (typeof provider === 'object' ? provider.id : provider))
+          .filter(Boolean)
+      ));
+      const providers = await Promise.all(providerIds.map(async (providerId) => {
+        if (this.providerDetailCache[providerId]) {
+          return this.providerDetailCache[providerId];
+        }
+        const provider = await modelProviderApi.getProvider(providerId);
+        this.providerDetailCache[providerId] = provider;
+        return provider;
+      }));
+      const paidProviders = providers.filter((provider) => provider.deployment_mode === 'api');
+      if (!paidProviders.length) {
+        return true;
+      }
+      await this.$alert(
+        [
+          `完整流程直接配置了 ${paidProviders.length} 个 API Provider：${paidProviders.map((item) => item.name).join('、')}。`,
+          '当前接口不能可靠聚合所有分镜、图片编辑和视频分段的最大费用，因此已阻止一键启动。',
+          '请按阶段执行并逐次确认最大预计费用，或将各阶段改为本地 Provider。',
+          '本地技术失败后的受控 API 回退仍由云授权、价目表和预算三重门管理。',
+        ].join('\n'),
+        '完整流程付费估算不完整',
+        { tone: 'warning' }
+      );
+      return false;
+    },
+
     async handleExecuteStage({ stageType, inputData }) {
+      let paidKeyId = null;
       try {
+        const paidDecision = await this.confirmConfiguredPaidStage(stageType, inputData);
+        if (paidDecision.required && !paidDecision.confirmed) {
+          return;
+        }
+        const confirmedInput = paidDecision.confirmed
+          ? {
+            ...inputData,
+            confirm_paid_generation: true,
+            confirmed_max_cost_cny: paidDecision.confirmedMaxCostCny,
+            explicit_provider_id: inputData?.explicit_provider_id || paidDecision.provider.id,
+          }
+          : inputData;
+        let idempotencyKey = null;
+        if (paidDecision.confirmed) {
+          paidKeyId = `${this.project.id}:${stageType}:${paidDecision.provider.id}`;
+          idempotencyKey = this.paidStageIdempotencyKeys[paidKeyId]
+            || `stage-api-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+          this.paidStageIdempotencyKeys[paidKeyId] = idempotencyKey;
+        }
         const result = await this.executeStage({
           projectId: this.project.id,
           stageName: stageType,
-          inputData: inputData
+          inputData: confirmedInput,
+          confirmPaidGeneration: paidDecision.confirmed,
+          confirmedMaxCostCny: paidDecision.confirmedMaxCostCny,
+          idempotencyKey,
         });
+
+        if (paidKeyId) {
+          delete this.paidStageIdempotencyKeys[paidKeyId];
+        }
 
         if (result?.skipped) {
           this.$message.info(result.message || '该阶段已跳过');
@@ -452,6 +680,11 @@ export default {
           this.connectStageSSE(stageType);
         }
       } catch (error) {
+        // 明确 4xx 表示请求被服务端拒绝，可丢弃旧键；网络错误和 5xx 则保留，
+        // 用户再次确认时复用同一键，让后端幂等层判定是否已经受理。
+        if (paidKeyId && error?.response?.status >= 400 && error.response.status < 500) {
+          delete this.paidStageIdempotencyKeys[paidKeyId];
+        }
         console.error('Failed to execute stage:', error);
         this.$message.error('执行失败');
       }
@@ -703,6 +936,7 @@ export default {
     },
     async handleTemplateUpdated() {
       try {
+        this.templateProviderIds = null;
         await this.refreshCanvasData();
       } catch (error) {
         console.error('[ProjectDetail] 刷新模板相关画布数据失败:', error);

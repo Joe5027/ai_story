@@ -9,6 +9,7 @@ import logging
 from typing import Any, Dict, Generator, List, Optional
 
 from django.conf import settings
+from apps.inference.services.hybrid import HybridInferenceService
 from core.ai_client.factory import create_ai_client
 from core.pipeline.base import PipelineContext, StageProcessor, StageResult
 from django.utils import timezone
@@ -422,9 +423,6 @@ class Image2VideoStageProcessor(StageProcessor):
                 }
                 return
 
-            model_name = provider.model_name
-            api_key = provider.api_key
-            api_url = provider.api_url
             image_url = image_urls[0].get("url", "") if image_urls else ""
             image_base64 = storyboard.get("url", "")
             camera_movement_description = self._build_camera_movement_description(project, scene_number)
@@ -439,11 +437,8 @@ class Image2VideoStageProcessor(StageProcessor):
                 },
             )
 
-            client = create_ai_client(provider)
-            generate_kwargs = {
-                'api_url': api_url,
-                'session_id': api_key,
-                'model': model_name,
+            request_parameters = {
+                'model': provider.model_name,
                 'prompt': prompt,
                 'camera_movement_description': camera_movement_description,
                 'duration': client_params.get('duration', 5),
@@ -454,13 +449,46 @@ class Image2VideoStageProcessor(StageProcessor):
                 'negative_prompt': client_params.get('negative_prompt', ''),
                 'poll_interval': client_params.get('poll_interval', self.poll_interval),
                 'max_wait_time': client_params.get('max_wait_time', self.max_wait_time),
+                'output_spec': {
+                    'duration_seconds': client_params.get('duration', 5),
+                    'fps': client_params.get('fps', 24),
+                    'aspect_ratio': client_params.get('aspect_ratio', '16:9'),
+                    'resolution': client_params.get('resolution') or None,
+                },
             }
             if image_base64:
-                generate_kwargs['image_base64'] = image_base64
+                request_parameters['image_base64'] = image_base64
             elif image_url:
-                generate_kwargs['image_uri'] = image_url
+                request_parameters['image_uri'] = image_url
 
-            video_urls = client._generate_video(**generate_kwargs)
+            def invoke(selected_provider, parameters, _repaired_structure):
+                # 旧视频执行器仍接收 api_url/session_id 等兼容参数，但密钥只在
+                # 已完成 Hybrid 三重门之后注入，绝不写入请求快照或预算详情。
+                client = create_ai_client(selected_provider)
+                generate_kwargs = {
+                    **parameters,
+                    'api_url': selected_provider.api_url,
+                    'session_id': selected_provider.api_key,
+                    'model': selected_provider.model_name,
+                }
+                generate_kwargs.pop('output_spec', None)
+                return client._generate_video(**generate_kwargs)
+
+            execution = HybridInferenceService.execute(
+                project=project,
+                capability='image2video',
+                stage_type=self.stage_type,
+                explicit_provider=provider,
+                manual_api=False,
+                request_parameters=request_parameters,
+                usage_estimate={
+                    'request_count': 1,
+                    'video_tasks': 1,
+                    'video_seconds': client_params.get('duration', 5),
+                },
+                invoke=invoke,
+            )
+            video_urls = execution.value
 
             yield {
                 "type": "video_generated",

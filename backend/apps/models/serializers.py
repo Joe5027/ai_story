@@ -4,9 +4,49 @@
 遵循单一职责原则(SRP)
 """
 
+import hashlib
+
 from rest_framework import serializers
 from .models import ModelProvider, ModelUsageLog, VendorConnectionConfig
 from .vendor_catalog import VENDOR_CATALOG
+from apps.inference.services.security import mask_sensitive_data
+from core.url_security import validate_service_url
+
+
+def mask_secret(value):
+    """只显示末四位，避免 serializer、CSV 或浏览器状态持有完整密钥。"""
+    value = str(value or '')
+    if not value:
+        return ''
+    return f'****{value[-4:]}'
+
+
+def summarize_ledger_payload(value, key=''):
+    """账本只保留结构和摘要，不回传完整提示词、媒体 URL 或 base64。"""
+    normalized = str(key).lower()
+    content_tokens = ('prompt', 'content', 'raw_text', 'base64', 'image_url', 'video_url')
+    if isinstance(value, dict):
+        return {item_key: summarize_ledger_payload(item, item_key) for item_key, item in value.items()}
+    if isinstance(value, list):
+        return [summarize_ledger_payload(item, key) for item in value]
+    if isinstance(value, str) and any(token in normalized for token in content_tokens):
+        return {
+            'omitted': True,
+            'length': len(value),
+            'sha256': hashlib.sha256(value.encode('utf-8')).hexdigest(),
+        }
+    return value
+
+
+def visible_provider_usage_logs(serializer, provider):
+    """返回当前请求可见的 Provider 账本；缺少请求上下文时默认拒绝。"""
+
+    request = serializer.context.get('request')
+    if not request:
+        return ModelUsageLog.objects.none()
+    # 延迟导入避免 serializers/services 的模块加载环；服务层是唯一隔离规则源。
+    from .services import ModelUsageLogService
+    return ModelUsageLogService.visible_to(request.user).filter(model_provider=provider)
 
 
 class ModelProviderListSerializer(serializers.ModelSerializer):
@@ -20,12 +60,15 @@ class ModelProviderListSerializer(serializers.ModelSerializer):
     # 统计信息
     total_usage_count = serializers.SerializerMethodField()
     recent_usage_count = serializers.SerializerMethodField()
+    runtime_node_name = serializers.CharField(source='runtime_node.name', read_only=True, default='')
 
     class Meta:
         model = ModelProvider
         fields = [
             'id', 'name', 'provider_type', 'provider_type_display',
-            'model_name', 'executor_class', 'is_active', 'priority',
+            'model_name', 'executor_class', 'deployment_mode', 'health_status',
+            'runtime_node', 'runtime_node_name', 'runtime_model_id',
+            'is_active', 'priority',
             'total_usage_count', 'recent_usage_count',
             'created_at', 'updated_at'
         ]
@@ -33,14 +76,16 @@ class ModelProviderListSerializer(serializers.ModelSerializer):
 
     def get_total_usage_count(self, obj):
         """获取总使用次数"""
-        return obj.usage_logs.count()
+        return visible_provider_usage_logs(self, obj).count()
 
     def get_recent_usage_count(self, obj):
         """获取最近7天使用次数"""
         from django.utils import timezone
         from datetime import timedelta
         seven_days_ago = timezone.now() - timedelta(days=7)
-        return obj.usage_logs.filter(created_at__gte=seven_days_ago).count()
+        return visible_provider_usage_logs(self, obj).filter(
+            created_at__gte=seven_days_ago
+        ).count()
 
 
 class ModelProviderDetailSerializer(serializers.ModelSerializer):
@@ -58,12 +103,18 @@ class ModelProviderDetailSerializer(serializers.ModelSerializer):
     success_rate = serializers.SerializerMethodField()
     avg_latency_ms = serializers.SerializerMethodField()
     total_tokens_used = serializers.SerializerMethodField()
+    has_api_key = serializers.SerializerMethodField()
+    api_key_masked = serializers.SerializerMethodField()
+    runtime_node_name = serializers.CharField(source='runtime_node.name', read_only=True, default='')
 
     class Meta:
         model = ModelProvider
         fields = [
             'id', 'name', 'provider_type', 'provider_type_display',
-            'api_url', 'api_key', 'model_name', 'executor_class',
+            'api_url', 'has_api_key', 'api_key_masked', 'model_name', 'executor_class',
+            'deployment_mode', 'runtime_node', 'runtime_node_name',
+            'runtime_model_id', 'runtime_adapter', 'supports_cloud_fallback',
+            'health_status',
             # LLM专用参数
             'max_tokens', 'temperature', 'top_p',
             # 通用参数
@@ -79,41 +130,47 @@ class ModelProviderDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
-    def to_representation(self, instance):
-        """隐藏API Key的完整内容"""
-        data = super().to_representation(instance)
-        return data
+    def get_has_api_key(self, obj):
+        return bool(obj.api_key)
+
+    def get_api_key_masked(self, obj):
+        return mask_secret(obj.api_key)
 
     def get_total_usage_count(self, obj):
         """获取总使用次数"""
-        return obj.usage_logs.count()
+        return visible_provider_usage_logs(self, obj).count()
 
     def get_success_count(self, obj):
         """获取成功次数"""
-        return obj.usage_logs.filter(status='success').count()
+        return visible_provider_usage_logs(self, obj).filter(status='success').count()
 
     def get_failed_count(self, obj):
         """获取失败次数"""
-        return obj.usage_logs.filter(status='failed').count()
+        return visible_provider_usage_logs(self, obj).filter(status='failed').count()
 
     def get_success_rate(self, obj):
         """获取成功率"""
-        total = obj.usage_logs.count()
+        logs = visible_provider_usage_logs(self, obj)
+        total = logs.count()
         if total == 0:
             return 0.0
-        success = obj.usage_logs.filter(status='success').count()
+        success = logs.filter(status='success').count()
         return round((success / total) * 100, 2)
 
     def get_avg_latency_ms(self, obj):
         """获取平均延迟"""
         from django.db.models import Avg
-        result = obj.usage_logs.aggregate(avg_latency=Avg('latency_ms'))
+        result = visible_provider_usage_logs(self, obj).aggregate(
+            avg_latency=Avg('latency_ms')
+        )
         return round(result['avg_latency'] or 0, 2)
 
     def get_total_tokens_used(self, obj):
         """获取总Token使用量"""
         from django.db.models import Sum
-        result = obj.usage_logs.aggregate(total_tokens=Sum('tokens_used'))
+        result = visible_provider_usage_logs(self, obj).aggregate(
+            total_tokens=Sum('tokens_used')
+        )
         return result['total_tokens'] or 0
 
 
@@ -125,25 +182,28 @@ class ModelProviderCreateSerializer(serializers.ModelSerializer):
         fields = [
             'name', 'provider_type', 'api_url', 'api_key', 'model_name',
             'executor_class',
+            'deployment_mode', 'runtime_node', 'runtime_model_id',
+            'runtime_adapter', 'supports_cloud_fallback',
             'max_tokens', 'temperature', 'top_p',
             'timeout', 'is_active', 'priority',
             'rate_limit_rpm', 'rate_limit_rpd',
             'extra_config'
         ]
+        extra_kwargs = {
+            'api_key': {'write_only': True, 'required': False, 'allow_blank': True},
+            'api_url': {'required': False, 'allow_blank': True},
+        }
 
     def validate_api_url(self, value):
         """验证API URL格式"""
-        if not value or not value.strip():
-            raise serializers.ValidationError("API URL不能为空")
-        if not value.startswith(('http://', 'https://')):
-            raise serializers.ValidationError("API URL必须以http://或https://开头")
-        return value.strip()
+        try:
+            return validate_service_url(value, field_label='API URL')
+        except ValueError as error:
+            raise serializers.ValidationError(str(error))
 
     def validate_api_key(self, value):
         """验证API Key"""
-        if not value or not value.strip():
-            raise serializers.ValidationError("API Key不能为空")
-        return value.strip()
+        return (value or '').strip()
 
     def validate_temperature(self, value):
         """验证温度参数"""
@@ -166,6 +226,24 @@ class ModelProviderCreateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         """交叉验证"""
         provider_type = attrs.get('provider_type')
+        deployment_mode = attrs.get('deployment_mode', 'api')
+
+        try:
+            attrs['api_url'] = validate_service_url(
+                attrs.get('api_url'),
+                require_https_for_non_loopback=deployment_mode == 'api',
+                field_label='API URL',
+            )
+        except ValueError as error:
+            raise serializers.ValidationError({'api_url': str(error)})
+
+        if deployment_mode == 'api':
+            if not attrs.get('api_url'):
+                raise serializers.ValidationError({'api_url': 'API Provider 必须配置地址'})
+            if not attrs.get('api_key'):
+                raise serializers.ValidationError({'api_key': 'API Provider 必须配置密钥'})
+        elif deployment_mode == 'local' and not attrs.get('runtime_node'):
+            raise serializers.ValidationError({'runtime_node': '本地 Provider 必须选择 Runtime 节点'})
 
         # 根据提供商类型验证必要配置
         if provider_type == 'llm':
@@ -216,26 +294,28 @@ class ModelProviderUpdateSerializer(serializers.ModelSerializer):
         model = ModelProvider
         fields = [
             'name', 'api_url', 'api_key', 'model_name',
-            'executor_class',
+            'executor_class', 'deployment_mode', 'runtime_node',
+            'runtime_model_id', 'runtime_adapter', 'supports_cloud_fallback',
             'max_tokens', 'temperature', 'top_p',
             'timeout', 'is_active', 'priority',
             'rate_limit_rpm', 'rate_limit_rpd',
             'extra_config'
         ]
+        extra_kwargs = {
+            'api_key': {'write_only': True, 'required': False, 'allow_blank': True},
+            'api_url': {'required': False, 'allow_blank': True},
+        }
 
     def validate_api_url(self, value):
         """验证API URL格式"""
-        if not value or not value.strip():
-            raise serializers.ValidationError("API URL不能为空")
-        if not value.startswith(('http://', 'https://')):
-            raise serializers.ValidationError("API URL必须以http://或https://开头")
-        return value.strip()
+        try:
+            return validate_service_url(value, field_label='API URL')
+        except ValueError as error:
+            raise serializers.ValidationError(str(error))
 
     def validate_api_key(self, value):
         """验证API Key"""
-        if not value or not value.strip():
-            raise serializers.ValidationError("API Key不能为空")
-        return value.strip()
+        return (value or '').strip()
 
     def validate_temperature(self, value):
         """验证温度参数"""
@@ -254,6 +334,32 @@ class ModelProviderUpdateSerializer(serializers.ModelSerializer):
         if value < 0:
             raise serializers.ValidationError("优先级不能为负数")
         return value
+
+    def validate(self, attrs):
+        deployment_mode = attrs.get('deployment_mode', self.instance.deployment_mode)
+        runtime_node = attrs.get('runtime_node', self.instance.runtime_node)
+        api_url = attrs.get('api_url', self.instance.api_url)
+        api_key = attrs.get('api_key')
+
+        try:
+            attrs['api_url'] = validate_service_url(
+                api_url,
+                require_https_for_non_loopback=deployment_mode == 'api',
+                field_label='API URL',
+            )
+            api_url = attrs['api_url']
+        except ValueError as error:
+            raise serializers.ValidationError({'api_url': str(error)})
+
+        # 编辑页不会回显旧密钥；空字符串表示“保持不变”，而不是擦除凭据。
+        if api_key == '':
+            attrs.pop('api_key', None)
+            api_key = self.instance.api_key
+        if deployment_mode == 'api' and (not api_url or not api_key):
+            raise serializers.ValidationError('API Provider 必须保留地址和密钥')
+        if deployment_mode == 'local' and not runtime_node:
+            raise serializers.ValidationError({'runtime_node': '本地 Provider 必须选择 Runtime 节点'})
+        return attrs
 
 
 class ModelProviderSimpleSerializer(serializers.ModelSerializer):
@@ -281,16 +387,46 @@ class ModelUsageLogSerializer(serializers.ModelSerializer):
         model = ModelUsageLog
         fields = [
             'id', 'model_provider', 'model_provider_name', 'model_provider_type',
-            'request_data', 'response_data',
-            'tokens_used', 'latency_ms', 'status', 'error_message',
+            'request_data', 'response_data', 'request_summary',
+            'tokens_used', 'input_tokens', 'output_tokens', 'image_count', 'video_seconds',
+            'latency_ms', 'status', 'error_message', 'error_code',
+            'deployment_mode', 'estimated_cost', 'settled_cost', 'currency',
+            'price_rate', 'work_item', 'runtime_node', 'attempt_number',
+            'idempotency_key', 'fallback_from', 'fallback_reason',
+            'media_hashes', 'media_dimensions', 'started_at', 'finished_at',
             'project_id', 'stage_type',
             'created_at'
         ]
         read_only_fields = ['id', 'created_at']
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['request_data'] = summarize_ledger_payload(
+            mask_sensitive_data(data.get('request_data', {}))
+        )
+        data['response_data'] = summarize_ledger_payload(
+            mask_sensitive_data(data.get('response_data', {}))
+        )
+        data['request_summary'] = mask_sensitive_data(data.get('request_summary', {}))
+        data['error_message'] = mask_sensitive_data(data.get('error_message', ''))
+        return data
+
 
 class ModelProviderTestSerializer(serializers.Serializer):
     """模型提供商测试连接序列化器"""
+
+    billable_smoke = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text='仅在明确执行真实生成测试时设为 true',
+    )
+    confirmed_max_cost_cny = serializers.DecimalField(
+        required=False,
+        max_digits=18,
+        decimal_places=6,
+        min_value=0,
+        default=0,
+    )
 
     test_prompt = serializers.CharField(
         required=False,
@@ -328,6 +464,14 @@ class ModelProviderTestSerializer(serializers.Serializer):
         if not provider.is_active:
             raise serializers.ValidationError("模型提供商未激活")
 
+        if attrs.get('billable_smoke'):
+            if provider.deployment_mode != 'api':
+                raise serializers.ValidationError({'billable_smoke': '本地或 Mock Provider 不属于付费 smoke'})
+            if attrs.get('confirmed_max_cost_cny', 0) <= 0:
+                raise serializers.ValidationError({
+                    'confirmed_max_cost_cny': '付费 smoke 必须明确确认最大费用'
+                })
+
         test_image_base64 = (attrs.get('test_image_base64') or '').strip()
         mime_type = (attrs.get('test_image_mime_type') or 'image/jpeg').strip() or 'image/jpeg'
 
@@ -356,6 +500,16 @@ class VendorModelDiscoverySerializer(serializers.Serializer):
         if not value:
             raise serializers.ValidationError('API Key不能为空')
         return value
+
+    def validate_api_url(self, value):
+        try:
+            return validate_service_url(
+                value,
+                require_https_for_non_loopback=True,
+                field_label='API URL',
+            )
+        except ValueError as error:
+            raise serializers.ValidationError(str(error))
 
     def validate(self, attrs):
         vendor_config = VENDOR_CATALOG.get(attrs['vendor'], {})
@@ -391,6 +545,16 @@ class VendorModelBatchCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError('API Key不能为空')
         return value
 
+    def validate_api_url(self, value):
+        try:
+            return validate_service_url(
+                value,
+                require_https_for_non_loopback=True,
+                field_label='API URL',
+            )
+        except ValueError as error:
+            raise serializers.ValidationError(str(error))
+
     def validate_model_names(self, value):
         cleaned_names = []
         seen = set()
@@ -422,11 +586,14 @@ class VendorConnectionConfigSerializer(serializers.ModelSerializer):
 
     vendor = serializers.ChoiceField(choices=[(key, value['label']) for key, value in VENDOR_CATALOG.items()])
     capability = serializers.ChoiceField(choices=ModelProvider.PROVIDER_TYPES)
+    api_key = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    has_api_key = serializers.SerializerMethodField()
+    api_key_masked = serializers.SerializerMethodField()
 
     class Meta:
         model = VendorConnectionConfig
         fields = [
-            'vendor', 'capability', 'api_key', 'api_url',
+            'vendor', 'capability', 'api_key', 'has_api_key', 'api_key_masked', 'api_url',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
@@ -434,8 +601,21 @@ class VendorConnectionConfigSerializer(serializers.ModelSerializer):
     def validate_api_key(self, value):
         return (value or '').strip()
 
+    def get_has_api_key(self, obj):
+        return bool(obj.api_key)
+
+    def get_api_key_masked(self, obj):
+        return mask_secret(obj.api_key)
+
     def validate_api_url(self, value):
-        return (value or '').strip()
+        try:
+            return validate_service_url(
+                value,
+                require_https_for_non_loopback=True,
+                field_label='API URL',
+            )
+        except ValueError as error:
+            raise serializers.ValidationError(str(error))
 
     def validate(self, attrs):
         vendor_config = VENDOR_CATALOG.get(attrs['vendor'], {})

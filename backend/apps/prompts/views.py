@@ -648,6 +648,16 @@ class GlobalVariableViewSet(viewsets.ModelViewSet):
         provider = self._get_requested_image_provider(provider_id)
         if not provider:
             return Response({'error': '未配置可用的文生图模型'}, status=status.HTTP_400_BAD_REQUEST)
+        if provider.deployment_mode == 'api':
+            return Response(
+                {
+                    'error': {
+                        'code': 'PAID_PROJECT_CONTEXT_REQUIRED',
+                        'message': '全局资产图片预览没有项目预算上下文，付费 API 已在外呼前阻断；请在项目内生成或选择本地/Mock Provider。',
+                    }
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         extra_config = provider.extra_config or {}
         width = int(request.data.get('width') or extra_config.get('width') or 1024)

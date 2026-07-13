@@ -12,6 +12,8 @@ Use this file to choose the strongest practical validation before closing AI Sto
 - Prefer the smallest command that would catch the changed behavior.
 - Keep generated media in `storage/` or configured external storage, not tracked source paths.
 - Do not log or commit raw API keys, JWTs, OpenCode passwords, model-provider credentials, or generated private media paths.
+- Do not claim that a paid-call path is safe unless tests prove all three fail-closed gates: explicit project cloud authorization, a currently effective versioned price, and an atomic project/global budget reservation. Every budget defaults to `0`.
+- Do not treat subjective quality, queue delay, or a manually selected quality profile as a technical failure eligible for automatic paid fallback.
 - If older docs and source disagree, validate against source and update `docs/project-map.md` or `docs/long-term-memory.md`.
 
 ## Backend Checks
@@ -28,6 +30,10 @@ Use from `backend/` unless noted.
 - Real SiliconFlow video smoke from repo root: `SILICONFLOW_API_KEY=<redacted> uv run python scripts/smoke-siliconflow-video.py`
 - Pytest route when dependencies are available: `pytest --cov apps --cov core`
 - Migration check before model changes: `uv run python manage.py makemigrations --check --dry-run`
+- Hybrid inference unit/API/scheduler route: `uv run python manage.py test apps.inference.tests apps.models.tests apps.ai_proxy.tests`
+- Project hybrid endpoint route: `uv run python manage.py test apps.inference.tests.test_api`
+- Disposable SQLite migration: set `SQLITE_DB_PATH` to a temporary file, then run `uv run python manage.py migrate --noinput` and targeted tests.
+- Disposable PostgreSQL migration: set a non-production `DATABASE_URL=postgresql://...`, run `uv run python manage.py migrate --noinput`, then verify table counts/constraints and run concurrency tests. SQLite-only evidence is insufficient for `select_for_update` claims.
 - Celery worker route: `uv run celery -A config worker -l info`
 - ASGI/SSE route: `./run_asgi.sh` or `daphne -b 0.0.0.0 -p 8000 config.asgi:application`
 
@@ -47,6 +53,47 @@ Known current validation notes:
 - Local required Redis smoke currently needs either a running Redis service or Docker Desktop Linux daemon; a Docker-based attempt on 2026-07-03 was blocked because the daemon was not available.
 - Required Redis smoke passed on 2026-07-03 using a user-supplied external Redis endpoint through transient environment variables. Do not commit Redis credentials or full connection URLs.
 - Real SiliconFlow video smoke passed on 2026-07-03 using a user-supplied API key through transient environment variables. The generated MP4 was downloaded under `storage/video`; do not commit API keys or temporary signed result URLs.
+- The hybrid implementation has a Mock-safe seed migration: two local resource nodes, profiles/routes for the five supported capabilities, inactive local providers, and zero budgets. Applying the migration is not proof that a real model is installed or usable.
+
+## Runtime Agent And Windows Runtime Checks
+
+Use from `runtime_agent/` unless noted.
+
+- Locked install: `uv sync --frozen --extra test`
+- Full Agent contract: `uv run --extra test pytest`
+- Dependency-light real-adapter configuration tests: `python -m pytest -q offline_tests`
+- Core journal/scheduler smoke: `python scripts/core_smoke.py`
+- Runtime process: `uv run python -m runtime_agent`
+- Windows script safety from repo root: `pwsh -NoProfile -File scripts/local-ai/Test-LocalAIScripts.ps1`
+- Read-only machine preflight: `pwsh -NoProfile -File scripts/local-ai/Test-Prerequisites.ps1`
+- Side-effect preview: run every mutating local-AI script with `-WhatIf` or `-DryRun` before applying it.
+
+The Runtime Agent contract is done only when auth, idempotency conflict, job create/query/cancel, restart recovery, resource mutual exclusion, artifact size/SHA-256 validation, and stable error envelopes pass. This proves the Agent control plane. It does not prove Ollama/ComfyUI/LightX2V model quality, license suitability, GPU memory safety, or overnight throughput.
+
+Model/package installation is never an automated test prerequisite. Each package needs an approved license/revision/size/SHA-256 manifest and an explicit per-package confirmation; model and workflow upgrades must retain rollback material.
+
+## Local AI Privacy, Cost, And Recovery Gates
+
+Before enabling `AI_ROUTER_V2_ENABLED` for a canary project, prove all of the following with request spies and persisted ledger state:
+
+- local success produces no external Provider request;
+- local technical failure plus no cloud authorization produces zero external POSTs;
+- cloud authorization plus project/global budget `0` produces zero external POSTs;
+- authorization and budget plus no effective price produces zero external POSTs;
+- all three gates passing invokes at most the configured paid fallback count and records price version, reservation, settlement, fallback source/reason, and idempotency key;
+- ambiguous post-submit crashes keep the reservation for manual review and do not submit again automatically;
+- worker/Agent/Redis restart recovers work items without duplicate media or duplicate billing;
+- API key serializers never return full secrets, and logs/CSV exports contain neither keys nor full sensitive prompts/media.
+
+Use PostgreSQL for concurrency evidence and a real Redis instance for lease/recovery evidence. Mock/SQLite tests remain valuable but cannot replace those integration gates.
+
+## Local AI Benchmark Gate
+
+- Canonical secret-free inputs: `benchmarks/local-ai/manifest.json` and its three referenced case files.
+- Run outputs: `storage/benchmark-runs/<timestamp>/` (not tracked).
+- Report target: `docs/local-ai/BENCHMARK_REPORT.md`.
+
+Every run must record Git commit, OS/GPU/RAM, model digest, workflow version/hash, seed, input-case revision, timing, peak VRAM/RAM, terminal status, and artifact hashes. Never fill missing measurements with estimates. Until the current Windows machine passes the relevant cases, real local profiles stay unavailable; in particular, `final` video must not be shown as locally available based only on Mock tests or model vendor claims.
 
 ## AI Operating-Surface Checks
 
@@ -72,6 +119,8 @@ Use from `frontend/`.
 - Authenticated browser smoke: `npm run smoke:auth`
 - Full local validation gate from repo root: `node scripts/validate-local.cjs`
 
+For `/local-ai/*` changes, lint/build are the minimum. The stronger browser route must cover runtime-node health, route/price editing, zero-default budgets, cloud authorization confirmation, estimates, work-item retry/cancel, paid-regeneration confirmation, ledger filtering/CSV redaction, and API keys never being echoed.
+
 Known current validation risk:
 
 - `webpack-dev-server` is now 5.2.5, `devServer.proxy` uses the v5 array schema, and the frontend Node engine is now `>=18.12.0`.
@@ -84,12 +133,18 @@ Known current validation risk:
 | --- | --- | --- |
 | Rules/skills/project docs | `node scripts/validate-ai-harness.cjs` | Harness check plus workspace audit and handoff validation |
 | Backend model/migration | `uv run python manage.py makemigrations --check --dry-run` | Targeted Django tests plus migration apply on disposable DB |
+| Hybrid route/privacy/price/budget | `apps.inference.tests` plus request-spy denial tests | PostgreSQL concurrent reservations and one controlled paid fallback |
+| Work item/scheduler | Work-item state/lease/idempotency tests | PostgreSQL + Redis worker/Agent restart and no-duplicate billing/media drill |
+| Runtime Agent | `uv run --extra test pytest` | Pinned real adapters plus restart/cancel/artifact checks on target hardware |
+| Windows runtime scripts | `Test-LocalAIScripts.ps1` | Fresh Windows dry-run, confirmed install, backup/log collection, and rollback rehearsal |
+| Local model/workflow | Secret-free case contract review | Target-machine `benchmarks/local-ai/` run with model/workflow hashes and resource capture |
 | Backend API/ViewSet | Targeted `manage.py test` for affected app | API smoke with authenticated request |
 | Celery stage/task | Targeted task or queue tests plus `test_celery_contract` | Worker + Redis local run |
 | SSE or Redis Pub/Sub | `test_sse_views`, `test_asgi_sse`, and optional `validate-streaming-local.cjs` | `validate-streaming-local.cjs --require-redis` with real Redis, Daphne, EventSource, and Vue UI |
 | AI client/executor | Unit test with mock provider | Provider sandbox call with redacted logs |
 | Prompt/template logic | Prompt tests or serializer tests | UI debug workbench smoke |
 | Vue route/component | `npm run lint` | `npm run build` plus browser screenshot/manual flow |
+| Local AI control panel | `npm run lint` and `npm run build` | Authenticated browser coverage for nodes/routes/budget/privacy/work items/ledger |
 | UI visual change | Existing visual baseline in `PromptList.vue` reviewed | Screenshot on desktop and mobile |
 | Docs/control surface | `node scripts/validate-ai-harness.cjs` | Workspace audit script plus handoff validation when memory changes |
 | Automation prompt | Read-only dry review of prompt contract | Trial run that produces only `Facts`, `Checks Run / Checks Missing`, `Risk`, `Next Highest-Value Action` |
