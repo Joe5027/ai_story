@@ -1296,19 +1296,19 @@ export default {
         // 检查并清除已完成的执行状态
         newVal.forEach(storyboard => {
           if (storyboard.image_generation?.images && storyboard.image_generation.images.length > 0) {
-            this.$set(this.executingNodes.images, storyboard.id, false);
+            this.executingNodes.images[storyboard.id] = false;
           }
           if (storyboard.multi_grid_image?.tasks && storyboard.multi_grid_image.tasks.length > 0) {
-            this.$set(this.executingNodes.multiGridImages, storyboard.id, false);
+            this.executingNodes.multiGridImages[storyboard.id] = false;
           }
           if (storyboard.image_edit?.results && storyboard.image_edit.results.length > 0) {
-            this.$set(this.executingNodes.imageEdits, storyboard.id, false);
+            this.executingNodes.imageEdits[storyboard.id] = false;
           }
           if (storyboard.camera_movement?.data) {
-            this.$set(this.executingNodes.cameras, storyboard.id, false);
+            this.executingNodes.cameras[storyboard.id] = false;
           }
           if (storyboard.video_generation?.videos && storyboard.video_generation.videos.length > 0) {
-            this.$set(this.executingNodes.videos, storyboard.id, false);
+            this.executingNodes.videos[storyboard.id] = false;
           }
         });
 
@@ -1361,7 +1361,7 @@ export default {
     console.log('[ProjectCanvas] Storyboards:', this.storyboards);
     console.log('[ProjectCanvas] AllNodePositions:', this.allNodePositions);
   },
-  beforeDestroy() {
+  beforeUnmount() {
     document.removeEventListener('click', this.handleDocumentClick);
     if (this.resizeFlushFrame) {
       cancelAnimationFrame(this.resizeFlushFrame);
@@ -1408,7 +1408,7 @@ export default {
           if (!pendingHeight || this.measuredNodeHeights[pendingNodeKey] === pendingHeight) {
             return;
           }
-          this.$set(this.measuredNodeHeights, pendingNodeKey, pendingHeight);
+          this.measuredNodeHeights[pendingNodeKey] = pendingHeight;
         });
       });
     },
@@ -1973,7 +1973,7 @@ export default {
         return;
       }
 
-      this.$set(this.runtimeMediaDimensions, storyboardId, { width, height });
+      this.runtimeMediaDimensions[storyboardId] = { width, height };
     },
 
     getStoryboardMediaDimensions(storyboard) {
@@ -2302,7 +2302,7 @@ export default {
       }
 
       Object.keys(patch).forEach((key) => {
-        this.$set(storyboard, key, patch[key]);
+        storyboard[key] = patch[key];
       });
     },
 
@@ -2317,10 +2317,10 @@ export default {
 
       const cameraData = storyboard.camera_movement.data;
       if (Object.prototype.hasOwnProperty.call(patch, 'movement_type')) {
-        this.$set(cameraData, 'movement_type', patch.movement_type);
+        cameraData.movement_type = patch.movement_type;
       }
       if (Object.prototype.hasOwnProperty.call(patch, 'movement_params')) {
-        this.$set(cameraData, 'movement_params', patch.movement_params);
+        cameraData.movement_params = patch.movement_params;
       }
     },
 
@@ -2328,9 +2328,9 @@ export default {
       if (!type || !key) {
         return;
       }
-      this.$set(this.nodeHighlights[type], key, true);
+      this.nodeHighlights[type][key] = true;
       window.setTimeout(() => {
-        this.$delete(this.nodeHighlights[type], key);
+        delete this.nodeHighlights[type][key];
       }, 1400);
     },
 
@@ -2346,7 +2346,7 @@ export default {
         }
 
         // 设置执行状态
-        this.$set(this.executingNodes.images, storyboardId, true);
+        this.executingNodes.images[storyboardId] = true;
 
         // 准备输入数据
         const inputData = {
@@ -2373,7 +2373,7 @@ export default {
         console.error('[ProjectCanvas] 生成图片失败:', error);
         this.$message?.error(error.message || '生成图片失败');
         // 清除执行状态
-        this.$set(this.executingNodes.images, storyboardId, false);
+        this.executingNodes.images[storyboardId] = false;
       }
     },
 
@@ -2384,7 +2384,7 @@ export default {
           this.$message?.error(`未找到分镜 ${storyboardId}`);
           return;
         }
-        this.$set(this.executingNodes.multiGridImages, storyboardId, true);
+        this.executingNodes.multiGridImages[storyboardId] = true;
         const inputData = {
           storyboard_ids: [storyboardId],
           scenes: [{
@@ -2405,7 +2405,7 @@ export default {
       } catch (error) {
         console.error('[ProjectCanvas] 生成多宫格图片失败:', error);
         this.$message?.error(error.message || '生成多宫格图片失败');
-        this.$set(this.executingNodes.multiGridImages, storyboardId, false);
+        this.executingNodes.multiGridImages[storyboardId] = false;
       }
     },
 
@@ -2420,7 +2420,7 @@ export default {
           this.$message?.warning('请先生成多宫格切片');
           return;
         }
-        this.$set(this.executingNodes.imageEdits, storyboardId, true);
+        this.executingNodes.imageEdits[storyboardId] = true;
         const inputData = {
           storyboard_ids: [storyboardId],
         };
@@ -2435,7 +2435,7 @@ export default {
       } catch (error) {
         console.error('[ProjectCanvas] 执行图片编辑失败:', error);
         this.$message?.error(error.message || '执行图片编辑失败');
-        this.$set(this.executingNodes.imageEdits, storyboardId, false);
+        this.executingNodes.imageEdits[storyboardId] = false;
       }
     },
 
@@ -2451,13 +2451,13 @@ export default {
         }
 
         // 设置执行状态
-        this.$set(this.executingNodes.cameras, storyboardId, true);
+        this.executingNodes.cameras[storyboardId] = true;
 
         // 准备输入数据
         const imageUrl = this.getCameraInputUrl(storyboard);
         if (!imageUrl) {
           this.$message?.warning('请先生成图片');
-          this.$set(this.executingNodes.cameras, storyboardId, false);
+          this.executingNodes.cameras[storyboardId] = false;
           return;
         }
 
@@ -2480,7 +2480,7 @@ export default {
         console.error('[ProjectCanvas] 生成运镜失败:', error);
         this.$message?.error(error.message || '生成运镜失败');
         // 清除执行状态
-        this.$set(this.executingNodes.cameras, storyboardId, false);
+        this.executingNodes.cameras[storyboardId] = false;
       }
     },
 
@@ -2508,13 +2508,13 @@ export default {
         }
 
         // 设置执行状态
-        this.$set(this.executingNodes.videos, storyboardId, true);
+        this.executingNodes.videos[storyboardId] = true;
 
         // 准备输入数据
         const imageUrl = this.getCameraInputUrl(storyboard);
         if (!imageUrl) {
           this.$message?.warning('请先生成图片');
-          this.$set(this.executingNodes.videos, storyboardId, false);
+          this.executingNodes.videos[storyboardId] = false;
           return;
         }
 
@@ -2544,7 +2544,7 @@ export default {
         console.error('[ProjectCanvas] 生成视频失败:', error);
         this.$message?.error(error.message || '生成视频失败');
         // 清除执行状态
-        this.$set(this.executingNodes.videos, storyboardId, false);
+        this.executingNodes.videos[storyboardId] = false;
       }
     },
 
@@ -2694,15 +2694,15 @@ export default {
       const storyboardId = storyboard.id;
 
       if (itemType === 'image') {
-        this.$set(this.executingNodes.images, storyboardId, isLoading);
+        this.executingNodes.images[storyboardId] = isLoading;
       } else if (itemType === 'multi_grid_image') {
-        this.$set(this.executingNodes.multiGridImages, storyboardId, isLoading);
+        this.executingNodes.multiGridImages[storyboardId] = isLoading;
       } else if (itemType === 'image_edit') {
-        this.$set(this.executingNodes.imageEdits, storyboardId, isLoading);
+        this.executingNodes.imageEdits[storyboardId] = isLoading;
       } else if (itemType === 'camera') {
-        this.$set(this.executingNodes.cameras, storyboardId, isLoading);
+        this.executingNodes.cameras[storyboardId] = isLoading;
       } else if (itemType === 'video') {
-        this.$set(this.executingNodes.videos, storyboardId, isLoading);
+        this.executingNodes.videos[storyboardId] = isLoading;
       }
     },
 

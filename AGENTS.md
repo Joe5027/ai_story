@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 - `backend/` holds Django (`config/settings/*` for env configs, `apps/` per domain, `core/` for shared pipeline and AI clients); supporting notes live in `backend/docs/`.
-- `frontend/` is a Vue 2 SPA under `frontend/src/` (components, views, Vuex store) with static assets in `frontend/src/assets/`. Infra artifacts live in `docker/` and `docker-compose.yml`, while generated media belongs in `storage/` outside Git.
+- `frontend/` is a Vue 3 SPA under `frontend/src/` (components, views, Vuex store) with static assets in `frontend/src/assets/`. Infra artifacts live in `docker/` and `docker-compose.yml`, while generated media belongs in `storage/` outside Git.
 
 ## Build, Test, and Development Commands
 - Launch everything with `docker-compose up -d`, then run `docker-compose exec backend python manage.py migrate` or `createsuperuser` whenever schema or creds change.
@@ -12,7 +12,15 @@
 Stick to PEP8 with four space indents, auto format via `black .`, and lint with `flake8 .`; keep modules SOLID aligned and name stages after their domain action (`rewrite`, `image_generation`). Vue code follows ESLint defaults, camelCase scripts, kebab case component tags, and the existing atoms or molecules or organisms folder split.
 
 ## Testing Guidelines
-Use `cd backend && pytest --cov apps --cov core` as the primary suite, storing new `test_*.py` files next to the feature or alongside existing probes such as `backend/test_celery_redis.py`. Reserve `python manage.py test` for smoke checks and rerun `test_sse.sh` after touching Channels or SSE code; include repro notes or screenshots for UI work until automated component tests are added.
+Use `cd backend && pytest --cov apps --cov core` as the primary suite, storing new `test_*.py` files next to the feature or alongside existing probes such as `backend/test_celery_redis.py`. Reserve `python manage.py test` for smoke checks and rerun `test_sse.sh` after touching Channels or SSE code. Run `node scripts/validate-ai-harness.cjs` after changing rules, skills, project docs, workflow stages, optional route wiring, or validation scripts. For the current pre-PR validation gate, run `node scripts/validate-local.cjs` from the repo root; it includes the AI workspace contract, backend check, Redis-free SSE/Celery contract tests, frontend audit/lint/build, Vue 2 inventory, and authenticated smoke. For Redis-backed streaming validation, run `node scripts/validate-streaming-local.cjs --require-redis` from the repo root after starting Redis; it includes Redis Pub/Sub plus Daphne/EventSource/Vue success and error flows. For only the authenticated Vue/Django rendered check, run `cd frontend && npm run smoke:auth`; it uses a temporary SQLite DB and cleans up local processes afterward.
+
+## Agent Operating Surface
+- Start new AI-assisted work from `docs/project-map.md` and `docs/done-definition.md`; they are the repo-local source of truth for navigation and validation.
+- Use `.codex/skills/ai-story-workspace/SKILL.md` when a task touches AI Story workflow, Django APIs, Vue UI, prompt/model configuration, SSE/Celery pipeline, or repo-specific validation.
+- Use `docs/knowledge-graph.md` for domain relationships and cross-layer dependency lookup before broad search.
+- Use `docs/long-term-memory.md` as the restart-ready handoff and durable memory packet for this workspace. Update it after substantial architecture, validation, or workflow discoveries.
+- Use `docs/automation-guardrails.md` for read-only recurring review prompts and automation boundaries. Do not let automations edit tracked files unless the user explicitly asks.
+- When `CLAUDE.md`, README files, or older docs disagree with source code, prefer source code plus `docs/project-map.md`, and record the drift instead of copying stale paths.
 
 
 ## Frontend UI Consistency

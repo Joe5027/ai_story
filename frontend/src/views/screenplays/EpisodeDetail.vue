@@ -153,7 +153,9 @@
             class="content-display"
           >
             <div class="content-header">
-              <h2 class="content-title">文案内容</h2>
+              <h2 class="content-title">
+                文案内容
+              </h2>
             </div>
             <div class="content-body">
               <pre v-if="episode.content">{{ episode.content }}</pre>

@@ -3,12 +3,14 @@ from unittest.mock import Mock, patch
 from django.test import SimpleTestCase
 
 from core.ai_client.image2video_client import VideoGeneratorClient
+from core.ai_client.siliconflow_video_client import SiliconFlowVideoClient
 from core.ai_client.volcengine_image2video_client import VolcengineImage2VideoClient
 
 
 class VideoGeneratorClientTestCase(SimpleTestCase):
+    @patch('core.ai_client.image2video_client.VideoGeneratorClient._localize_video_data', side_effect=lambda data, timeout: data)
     @patch('core.ai_client.image2video_client.requests.post')
-    def test_chat_completions_endpoint_extracts_video_url(self, mock_post):
+    def test_chat_completions_endpoint_extracts_video_url(self, mock_post, mock_localize):
         mock_response = Mock()
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
@@ -51,8 +53,9 @@ class VideoGeneratorClientTestCase(SimpleTestCase):
             mock_post.call_args.kwargs['json']['messages'][0]['content'][0]['text'],
         )
 
+    @patch('core.ai_client.image2video_client.VideoGeneratorClient._read_image_url_as_base64', return_value='ZmFrZV9pbWFnZV9iYXNlNjQ=')
     @patch('core.ai_client.image2video_client.requests.post')
-    def test_video_generations_endpoint_keeps_original_url(self, mock_post):
+    def test_video_generations_endpoint_keeps_original_url(self, mock_post, mock_read_image):
         mock_response = Mock()
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
@@ -227,3 +230,76 @@ class VolcengineImage2VideoClientTestCase(SimpleTestCase):
 
         self.assertIn('连续查询异常达到 2 次', str(exc.exception))
         self.assertEqual(mock_get_task.call_count, 2)
+
+
+class SiliconFlowVideoClientTestCase(SimpleTestCase):
+    @patch('core.ai_client.siliconflow_video_client.VideoGeneratorClient._localize_video_data', side_effect=lambda data, timeout: data)
+    @patch('core.ai_client.siliconflow_video_client.requests.post')
+    def test_generate_video_uses_submit_and_status_api(self, mock_post, mock_localize):
+        submit_response = Mock()
+        submit_response.raise_for_status.return_value = None
+        submit_response.json.return_value = {'requestId': 'request-123'}
+
+        queued_response = Mock()
+        queued_response.raise_for_status.return_value = None
+        queued_response.json.return_value = {'status': 'InQueue', 'reason': ''}
+
+        success_response = Mock()
+        success_response.raise_for_status.return_value = None
+        success_response.json.return_value = {
+            'status': 'Succeed',
+            'reason': '',
+            'results': {
+                'videos': [{'url': 'https://example.com/generated.mp4'}],
+                'timings': {'inference': 123},
+                'seed': 11,
+            },
+        }
+        mock_post.side_effect = [submit_response, queued_response, success_response]
+
+        client = SiliconFlowVideoClient(
+            api_url='https://api.siliconflow.cn/v1/video/submit',
+            api_token='secret',
+            model='Wan-AI/Wan2.2-I2V-A14B',
+        )
+
+        result = client._generate_video(
+            prompt='小猫缓慢转头看向镜头',
+            model='Wan-AI/Wan2.2-I2V-A14B',
+            image_base64='ZmFrZV9pbWFnZQ==',
+            image_mime_type='image/jpeg',
+            aspect_ratio='16:9',
+            seed=11,
+            poll_interval=0,
+        )
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['data'], [{'url': 'https://example.com/generated.mp4'}])
+        self.assertEqual(result['metadata']['task_id'], 'request-123')
+        self.assertEqual(mock_post.call_args_list[0].args[0], 'https://api.siliconflow.cn/v1/video/submit')
+        submit_payload = mock_post.call_args_list[0].kwargs['json']
+        self.assertEqual(submit_payload['model'], 'Wan-AI/Wan2.2-I2V-A14B')
+        self.assertEqual(submit_payload['image_size'], '1280x720')
+        self.assertEqual(submit_payload['image'], 'data:image/jpeg;base64,ZmFrZV9pbWFnZQ==')
+        self.assertEqual(submit_payload['seed'], 11)
+        self.assertEqual(mock_post.call_args_list[1].args[0], 'https://api.siliconflow.cn/v1/video/status')
+        self.assertEqual(mock_post.call_args_list[1].kwargs['json'], {'requestId': 'request-123'})
+
+    @patch('core.ai_client.siliconflow_video_client.time.sleep', return_value=None)
+    def test_wait_breaks_after_max_poll_attempts(self, mock_sleep):
+        client = SiliconFlowVideoClient(
+            api_url='https://api.siliconflow.cn/v1/video/submit',
+            api_token='secret',
+            model='Wan-AI/Wan2.2-T2V-A14B',
+        )
+
+        with patch.object(client, 'get_task_status', return_value={'status': 'InProgress'}):
+            with self.assertRaises(TimeoutError) as exc:
+                client.wait_for_completion(
+                    task_id='request-123',
+                    poll_interval=0,
+                    max_wait_time=600,
+                    max_poll_attempts=2,
+                )
+
+        self.assertIn('轮询次数超过 2 次', str(exc.exception))

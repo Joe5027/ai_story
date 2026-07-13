@@ -234,7 +234,7 @@ export default {
   created() {
     this.loadProviders()
   },
-  beforeDestroy() {
+  beforeUnmount() {
     clearTimeout(this.searchTimer)
   },
   methods: {

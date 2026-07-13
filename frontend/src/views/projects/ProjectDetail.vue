@@ -78,7 +78,7 @@ export default {
   created() {
     this.fetchData();
   },
-  beforeDestroy() {
+  beforeUnmount() {
     this.unregisterProjectAssistant();
     this.sseRecoveryEnabled = false;
     this.disconnectAllSSE({ clearMarkers: true });

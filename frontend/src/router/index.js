@@ -1,8 +1,5 @@
-import Vue from 'vue';
-import VueRouter from 'vue-router';
+import { createRouter, createWebHistory } from 'vue-router';
 import store from '@/store';
-
-Vue.use(VueRouter);
 
 const routes = [
   {
@@ -214,20 +211,19 @@ const routes = [
     meta: { title: '页面不存在' },
   },
   {
-    path: '*',
+    path: '/:pathMatch(.*)*',
     redirect: '/404',
   },
 ];
 
-const router = new VueRouter({
-  mode: 'history',
-  base: process.env.BASE_URL,
+const router = createRouter({
+  history: createWebHistory(process.env.BASE_URL),
   routes,
   scrollBehavior(to, from, savedPosition) {
     if (savedPosition) {
       return savedPosition;
     }
-    return { x: 0, y: 0 };
+    return { left: 0, top: 0 };
   },
 });
 

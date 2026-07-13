@@ -20,7 +20,7 @@ backend/
 │   ├── urls.py               # 主路由
 │   ├── asgi.py               # ASGI配置
 │   ├── wsgi.py               # WSGI配置
-│   └── celery.py             # Celery配置
+│   └── celery_app.py         # Celery配置
 │
 ├── apps/                     # 应用模块
 │   ├── projects/            # 项目管理

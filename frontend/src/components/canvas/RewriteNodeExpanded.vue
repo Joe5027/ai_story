@@ -293,7 +293,7 @@ export default {
       }
     }
   },
-  beforeDestroy() {
+  beforeUnmount() {
     if (this.sseClient) {
       this.sseClient.disconnect();
       this.sseClient = null;

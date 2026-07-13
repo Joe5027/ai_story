@@ -245,6 +245,15 @@ VENDOR_CATALOG: Dict[str, Dict[str, Any]] = {
                 'recommended_patterns': ['deepseek', 'qwen', 'glm', 'kimi'],
                 'configurable_api_url': True,
             },
+            'image2video': {
+                'provider_type': 'image2video',
+                'api_url': 'https://api.siliconflow.cn/v1/video/submit',
+                'models_endpoint': 'https://api.siliconflow.cn/v1/models',
+                'executor_class': 'core.ai_client.siliconflow_video_client.SiliconFlowVideoClient',
+                'model_filter': ['wan', 'video'],
+                'recommended_patterns': ['Wan-AI/Wan2.2-T2V-A14B', 'Wan-AI/Wan2.2-I2V-A14B'],
+                'configurable_api_url': True,
+            },
         },
     },
     'openrouter': {

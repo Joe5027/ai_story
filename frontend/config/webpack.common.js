@@ -1,7 +1,10 @@
 const path = require('path');
 const webpack = require('webpack');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
+const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const { VueLoaderPlugin } = require('vue-loader');
+
+const isProduction = process.env.NODE_ENV === 'production';
 
 module.exports = {
   entry: {
@@ -17,7 +20,7 @@ module.exports = {
     extensions: ['.js', '.vue', '.json'],
     alias: {
       '@': path.resolve(__dirname, '../src'),
-      'vue$': 'vue/dist/vue.esm.js',
+      'vue$': 'vue/dist/vue.runtime.esm-bundler.js',
     },
   },
   module: {
@@ -34,7 +37,7 @@ module.exports = {
       {
         test: /\.css$/,
         use: [
-          'vue-style-loader',
+          isProduction ? MiniCssExtractPlugin.loader : 'style-loader',
           'css-loader',
           'postcss-loader',
         ],
@@ -69,12 +72,13 @@ module.exports = {
     }),
     // 定义环境变量，使其在浏览器环境中可用
     new webpack.DefinePlugin({
-      'process.env': {
-        NODE_ENV: JSON.stringify(process.env.NODE_ENV || 'development'),
-        BASE_URL: JSON.stringify('/'),
-        VUE_APP_API_URL: JSON.stringify(process.env.VUE_APP_API_URL || 'http://localhost:8000'),
-        VUE_APP_WS_URL: JSON.stringify(process.env.VUE_APP_WS_URL || 'ws://localhost:8000'),
-      },
+      'process.env.BASE_URL': JSON.stringify('/'),
+      'process.env.VUE_APP_API_BASE_URL': JSON.stringify(process.env.VUE_APP_API_BASE_URL || '/api/v1'),
+      'process.env.VUE_APP_API_URL': JSON.stringify(process.env.VUE_APP_API_URL || 'http://localhost:8000'),
+      'process.env.VUE_APP_WS_URL': JSON.stringify(process.env.VUE_APP_WS_URL || 'ws://localhost:8000'),
+      __VUE_OPTIONS_API__: JSON.stringify(true),
+      __VUE_PROD_DEVTOOLS__: JSON.stringify(false),
+      __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: JSON.stringify(false),
     }),
   ],
 };

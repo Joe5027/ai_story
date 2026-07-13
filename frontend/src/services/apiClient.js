@@ -58,6 +58,7 @@ apiClient.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config;
     const { response } = error;
+    const suppressGlobalError = Boolean(originalRequest?.suppressGlobalError);
 
     // 处理token过期的情况
     if (response && response.status === 401 && !originalRequest._retry) {
@@ -117,6 +118,10 @@ apiClient.interceptors.response.use(
     }
 
     // 处理其他HTTP错误
+    if (suppressGlobalError) {
+      return Promise.reject(error);
+    }
+
     if (response) {
       switch (response.status) {
         case 400:

@@ -347,6 +347,9 @@ class ModelProviderVendorViewSetTestCase(APITestCase):
         gemini_capability_keys = [item['key'] for item in gemini['capabilities']]
         self.assertIn('text2image', gemini_capability_keys)
         self.assertIn('image2video', gemini_capability_keys)
+        siliconflow = next(item for item in response.data['results'] if item['key'] == 'siliconflow')
+        siliconflow_capability_keys = [item['key'] for item in siliconflow['capabilities']]
+        self.assertIn('image2video', siliconflow_capability_keys)
         modelscope = next(item for item in response.data['results'] if item['key'] == 'modelscope')
         self.assertEqual(modelscope['capabilities'][0]['api_url'], 'https://api-inference.modelscope.cn/v1/chat/completions')
         openai = next(item for item in response.data['results'] if item['key'] == 'openai')
@@ -561,6 +564,28 @@ class ModelProviderVendorViewSetTestCase(APITestCase):
         provider = ModelProvider.objects.get(model_name='kling-v1')
         self.assertEqual(provider.provider_type, 'image2video')
         self.assertEqual(provider.api_url, 'https://newapi.example.com/v1/videos/generations')
+
+    def test_batch_create_vendor_models_supports_siliconflow_image2video(self):
+        response = self.client.post('/api/v1/models/providers/batch_create_vendor_models/', {
+            'vendor': 'siliconflow',
+            'capability': 'image2video',
+            'api_key': 'sk-test',
+            'model_names': ['Wan-AI/Wan2.2-T2V-A14B'],
+            'is_active': True,
+            'timeout': 60,
+            'max_tokens': 4096,
+            'temperature': 0.7,
+            'top_p': 1.0,
+            'rate_limit_rpm': 60,
+            'rate_limit_rpd': 1000,
+            'priority': 0,
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        provider = ModelProvider.objects.get(model_name='Wan-AI/Wan2.2-T2V-A14B')
+        self.assertEqual(provider.provider_type, 'image2video')
+        self.assertEqual(provider.api_url, 'https://api.siliconflow.cn/v1/video/submit')
+        self.assertEqual(provider.executor_class, 'core.ai_client.siliconflow_video_client.SiliconFlowVideoClient')
 
     def test_vendor_connection_config_get_returns_saved_config(self):
         VendorConnectionConfig.objects.create(

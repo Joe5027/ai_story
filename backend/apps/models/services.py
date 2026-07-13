@@ -868,6 +868,7 @@ class ModelProviderService:
         from core.ai_client.mock_image2video_client import MockImage2VideoClient
         from core.ai_client.image2video_client import VideoGeneratorClient
         from core.ai_client.volcengine_image2video_client import VolcengineImage2VideoClient
+        from core.ai_client.siliconflow_video_client import SiliconFlowVideoClient
 
         extra_config = provider.extra_config or {}
         used_default_test_image = False
@@ -937,10 +938,13 @@ class ModelProviderService:
             'core.ai_client.image2video_client.VideoGeneratorClient',
             'core.ai_client.image2video_client.Image2VideoClient',
             'core.ai_client.volcengine_image2video_client.VolcengineImage2VideoClient',
+            'core.ai_client.siliconflow_video_client.SiliconFlowVideoClient',
         ):
             client_class = VideoGeneratorClient
             if executor_class_path == 'core.ai_client.volcengine_image2video_client.VolcengineImage2VideoClient':
                 client_class = VolcengineImage2VideoClient
+            elif executor_class_path == 'core.ai_client.siliconflow_video_client.SiliconFlowVideoClient':
+                client_class = SiliconFlowVideoClient
 
             client = await sync_to_async(client_class)(
                 api_url=provider.api_url,

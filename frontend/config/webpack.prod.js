@@ -1,4 +1,5 @@
 const { merge } = require('webpack-merge');
+process.env.NODE_ENV = 'production';
 const common = require('./webpack.common.js');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 
@@ -27,5 +28,9 @@ module.exports = merge(common, {
       },
     },
     runtimeChunk: 'single',
+  },
+  performance: {
+    maxEntrypointSize: 512 * 1024,
+    maxAssetSize: 300 * 1024,
   },
 });

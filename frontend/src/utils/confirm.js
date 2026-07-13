@@ -1,4 +1,4 @@
-import Vue from 'vue';
+import { nextTick, reactive } from 'vue';
 
 const defaultState = {
   visible: false,
@@ -11,7 +11,7 @@ const defaultState = {
   showCancel: true,
 };
 
-const state = Vue.observable({ ...defaultState });
+const state = reactive({ ...defaultState });
 
 const queue = [];
 let activeRequest = null;
@@ -35,7 +35,7 @@ function finish(result) {
   Object.assign(state, { ...defaultState });
   resolve(result ? confirmValue : cancelValue);
 
-  Vue.nextTick(() => {
+  nextTick(() => {
     showNext();
   });
 }

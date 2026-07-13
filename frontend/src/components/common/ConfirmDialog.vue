@@ -134,7 +134,7 @@ export default {
   mounted() {
     document.addEventListener('keydown', this.handleKeydown);
   },
-  beforeDestroy() {
+  beforeUnmount() {
     document.removeEventListener('keydown', this.handleKeydown);
   },
   methods: {
